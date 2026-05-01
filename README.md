@@ -121,6 +121,7 @@ python scripts/verify_postgres_db.py     # needs GRADE_DATABASE_URL (pip install
 |----------|-------------|
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | System design (note: diagram may describe earlier SBERT/Postgres-only assumptions). |
 | [docs/IMPLEMENTATION_PLAN.md](docs/IMPLEMENTATION_PLAN.md) | Phased plan and v2 direction. |
+| [docs/OCR_CHUNKING_RUNBOOK.md](docs/OCR_CHUNKING_RUNBOOK.md) | Procedure for whole-PDF OCR, confidence reporting, and chunk JSON export. |
 
 ---
 
