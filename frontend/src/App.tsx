@@ -1,47 +1,50 @@
-import { NavLink, Route, Routes } from "react-router-dom";
-import Home from "./pages/Home";
-import UploadBoth from "./pages/UploadBoth";
-import UploadKey from "./pages/UploadKey";
-import UploadSheet from "./pages/UploadSheet";
-import Evaluate from "./pages/Evaluate";
-import Results from "./pages/Results";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { BrowserRouter, Route, Routes } from "react-router-dom";
+import { Toaster as Sonner } from "@/components/ui/sonner";
+import { Toaster } from "@/components/ui/toaster";
+import { TooltipProvider } from "@/components/ui/tooltip";
+import AppLayout from "./layouts/AppLayout";
+import Index from "./pages/Index.tsx";
+import Keys from "./pages/Keys.tsx";
+import KeyNew from "./pages/KeyNew.tsx";
+import Sheets from "./pages/Sheets.tsx";
+import SheetNew from "./pages/SheetNew.tsx";
+import Evaluate from "./pages/Evaluate.tsx";
+import Results from "./pages/Results.tsx";
+import Metrics from "./pages/Metrics.tsx";
+import RagExplorer from "./pages/RagExplorer.tsx";
+import NotFound from "./pages/NotFound.tsx";
 
-export default function App() {
-  return (
-    <div className="app-shell">
-      <header>
-        <h1>GRADE — Handwritten answer grading</h1>
-        <nav>
-          <NavLink to="/" end className={({ isActive }) => (isActive ? "active" : "")}>
-            Home
-          </NavLink>
-          <NavLink to="/upload" className={({ isActive }) => (isActive ? "active" : "")}>
-            Upload (key + sheet)
-          </NavLink>
-          <NavLink to="/upload-key" className={({ isActive }) => (isActive ? "active" : "")}>
-            Key only
-          </NavLink>
-          <NavLink to="/upload-sheet" className={({ isActive }) => (isActive ? "active" : "")}>
-            Sheet only
-          </NavLink>
-          <NavLink to="/evaluate" className={({ isActive }) => (isActive ? "active" : "")}>
-            Evaluate
-          </NavLink>
-          <NavLink to="/results" className={({ isActive }) => (isActive ? "active" : "")}>
-            Results
-          </NavLink>
-        </nav>
-      </header>
-      <main>
+const queryClient = new QueryClient();
+
+const App = () => (
+  <QueryClientProvider client={queryClient}>
+    <TooltipProvider>
+      <Toaster />
+      <Sonner />
+      <BrowserRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
         <Routes>
-          <Route path="/" element={<Home />} />
-          <Route path="/upload" element={<UploadBoth />} />
-          <Route path="/upload-key" element={<UploadKey />} />
-          <Route path="/upload-sheet" element={<UploadSheet />} />
-          <Route path="/evaluate" element={<Evaluate />} />
-          <Route path="/results" element={<Results />} />
+          <Route element={<AppLayout />}>
+            <Route path="/" element={<Index />} />
+            <Route path="/keys" element={<Keys />} />
+            <Route path="/keys/new" element={<KeyNew />} />
+            <Route path="/keys/:examId" element={<Keys />} />
+            <Route path="/sheets" element={<Sheets />} />
+            <Route path="/sheets/new" element={<SheetNew />} />
+            <Route path="/sheets/:sheetId" element={<Sheets />} />
+            <Route path="/evaluate" element={<Evaluate />} />
+            <Route path="/evaluate/:sheetId" element={<Evaluate />} />
+            <Route path="/results" element={<Results />} />
+            <Route path="/results/:resultId" element={<Results />} />
+            <Route path="/metrics" element={<Metrics />} />
+            <Route path="/rag" element={<RagExplorer />} />
+          </Route>
+          {/* ADD ALL CUSTOM ROUTES ABOVE THE CATCH-ALL "*" ROUTE */}
+          <Route path="*" element={<NotFound />} />
         </Routes>
-      </main>
-    </div>
-  );
-}
+      </BrowserRouter>
+    </TooltipProvider>
+  </QueryClientProvider>
+);
+
+export default App;

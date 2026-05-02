@@ -20,6 +20,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
 
 from autograder.db import (
+    get_rag_chunks_for_sheet,
     get_result,
     get_sheet,
     init_db,
@@ -27,7 +28,12 @@ from autograder.db import (
     insert_evaluation_result,
     insert_sheet,
     list_answer_keys,
+    list_exams_with_counts,
+    list_results,
+    list_sheets,
+    metrics_overview,
     next_answer_key_sort_order_start,
+    search_rag_chunks,
 )
 from autograder.embeddings import embed_text_local, retrieve_top_k
 from autograder.key_pdf import pdf_bytes_to_upload_request
@@ -334,8 +340,39 @@ async def upload_key_file(
     raise HTTPException(status_code=400, detail="Upload a .json or text-based .pdf answer key file")
 
 
+@app.get("/api/exams")
+def api_exams():
+    rows = list_exams_with_counts()
+    return [
+        {
+            "id": r.get("exam_id"),
+            "title": r.get("title") or r.get("exam_id"),
+            "key_count": int(r.get("key_count") or 0),
+            "sheet_count": int(r.get("sheet_count") or 0),
+            "last_eval_at": r.get("last_eval_at"),
+        }
+        for r in rows
+    ]
+
+
+@app.get("/api/exams/{exam_id}")
+def api_exam_detail(exam_id: str):
+    keys = list_answer_keys(exam_id)
+    sheets = list_sheets(exam_id=exam_id, limit=1000)
+    if not keys and not sheets:
+        raise HTTPException(status_code=404, detail="exam_id not found")
+    return {
+        "exam": {"id": exam_id, "title": exam_id},
+        "keys": keys,
+        "sheets": sheets,
+    }
+
+
 @app.post("/upload/sheet", response_model=UploadSheetResponse)
-def upload_sheet(file: UploadFile = File(...)):
+def upload_sheet(
+    file: UploadFile = File(...),
+    exam_id: str | None = Form(default=None),
+):
     """
     Separate upload path for scanned answer sheets (image).
     """
@@ -351,8 +388,38 @@ def upload_sheet(file: UploadFile = File(...)):
     finally:
         os.close(fd)
 
-    sheet_id = insert_sheet(file.filename, tmp_path)
+    exid = exam_id.strip() if exam_id and exam_id.strip() else None
+    sheet_id = insert_sheet(file.filename, tmp_path, exam_id=exid)
     return UploadSheetResponse(sheet_id=sheet_id, filename=file.filename)
+
+
+@app.get("/api/sheets")
+def api_sheets(exam_id: str | None = None, limit: int = 200, offset: int = 0):
+    rows = list_sheets(exam_id=exam_id, limit=limit, offset=offset)
+    recent = list_results(limit=2000)
+    by_sheet: Dict[str, Dict] = {}
+    for r in recent:
+        sid = str(r.get("sheet_id") or "")
+        if sid and sid not in by_sheet:
+            by_sheet[sid] = r
+    out = []
+    for s in rows:
+        sid = str(s.get("id") or "")
+        rr = by_sheet.get(sid)
+        status = "evaluated" if rr else "ingested"
+        out.append(
+            {
+                "id": sid,
+                "filename": s.get("filename"),
+                "path": s.get("path"),
+                "exam_id": s.get("exam_id"),
+                "created_at": s.get("created_at"),
+                "status": status,
+                "ocr_engine": (rr or {}).get("ocr_engine_used") or "unknown",
+                "page_count": 1,
+            }
+        )
+    return out
 
 
 @app.get("/sheet/{sheet_id}/file")
@@ -368,6 +435,81 @@ def download_sheet_file(sheet_id: str):
         filename=row.get("filename") or path.name,
         media_type="application/octet-stream",
     )
+
+
+@app.get("/api/sheet/{sheet_id}/chunks")
+def api_sheet_chunks(sheet_id: str, limit: int = 500):
+    chunks = get_rag_chunks_for_sheet(sheet_id, limit=limit)
+    out = []
+    for c in chunks:
+        m = c.get("meta") or {}
+        out.append(
+            {
+                "chunk_id": c.get("chunk_id"),
+                "document_id": c.get("document_id"),
+                "chunk_index": c.get("chunk_index"),
+                "text": c.get("text_content") or "",
+                "page": int((m or {}).get("source_page") or 1),
+                "region": (m or {}).get("region_id") or "",
+                "ocr_confidence": float((m or {}).get("ocr_confidence") or 0.0),
+                "meta": m,
+            }
+        )
+    return out
+
+
+@app.get("/api/results")
+def api_results(
+    exam_id: str | None = None,
+    sheet_id: str | None = None,
+    limit: int = 200,
+    offset: int = 0,
+):
+    return list_results(exam_id=exam_id, sheet_id=sheet_id, limit=limit, offset=offset)
+
+
+@app.get("/api/metrics/overview")
+def api_metrics_overview():
+    return metrics_overview()
+
+
+@app.post("/api/rag/search")
+def api_rag_search(payload: Dict):
+    query = str(payload.get("query") or "").strip()
+    if not query:
+        raise HTTPException(status_code=400, detail="query is required")
+    top_k = int(payload.get("top_k") or 5)
+    sheet_id = str(payload.get("sheet_id") or "").strip() or None
+    exam_id = str(payload.get("exam_id") or "").strip() or None
+    document_id = None
+    if sheet_id:
+        s = get_sheet(sheet_id)
+        if not s:
+            raise HTTPException(status_code=404, detail="sheet_id not found")
+        chunks = get_rag_chunks_for_sheet(sheet_id, limit=1)
+        if chunks:
+            document_id = chunks[0].get("document_id")
+    qv = embed_text_local(query)
+    hits = search_rag_chunks(qv, top_k=top_k, document_id=document_id)
+    out = []
+    for h in hits:
+        m = h.get("meta") or {}
+        hit_exam_id = (m or {}).get("exam_id")
+        if exam_id and hit_exam_id and str(hit_exam_id) != exam_id:
+            continue
+        out.append(
+            {
+                "chunk_id": h.get("chunk_id"),
+                "document_id": h.get("document_id"),
+                "text": h.get("text_content") or "",
+                "score": float(1.0 - float(h.get("distance") or 0.0)),
+                "page": int((m or {}).get("source_page") or 1),
+                "region": (m or {}).get("region_id") or "",
+                "sheet_id": sheet_id,
+                "exam_id": hit_exam_id or exam_id,
+            }
+        )
+    return out
 
 
 @app.post("/evaluate", response_model=EvaluateResponse)

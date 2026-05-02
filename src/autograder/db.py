@@ -189,10 +189,16 @@ CREATE TABLE IF NOT EXISTS public.sheets (
     id TEXT PRIMARY KEY,
     filename TEXT NOT NULL,
     path TEXT NOT NULL,
+    exam_id TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 )
 """.strip(),
     "COMMENT ON TABLE public.sheets IS 'Scanned answer sheets; path is filesystem or storage URI resolved by the API'",
+    "ALTER TABLE public.sheets ADD COLUMN IF NOT EXISTS exam_id TEXT",
+    """
+CREATE INDEX IF NOT EXISTS idx_sheets_exam_created
+    ON public.sheets (exam_id, created_at DESC)
+""".strip(),
     """
 CREATE TABLE IF NOT EXISTS public.answer_keys (
     id TEXT PRIMARY KEY,
@@ -294,13 +300,13 @@ def init_db() -> None:
                     raise
 
 
-def insert_sheet(filename: str, path: str) -> str:
+def insert_sheet(filename: str, path: str, exam_id: Optional[str] = None) -> str:
     sheet_id = str(uuid.uuid4())
     with psycopg.connect(_connection_dsn(), row_factory=dict_row) as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "INSERT INTO public.sheets (id, filename, path) VALUES (%s, %s, %s)",
-                (sheet_id, filename, path),
+                "INSERT INTO public.sheets (id, filename, path, exam_id) VALUES (%s, %s, %s, %s)",
+                (sheet_id, filename, path, exam_id),
             )
     return sheet_id
 
@@ -316,6 +322,47 @@ def get_sheet(sheet_id: str) -> Optional[Dict[str, Any]]:
     if d.get("created_at") is not None:
         d["created_at"] = str(d["created_at"])
     return d
+
+
+def list_sheets(
+    *,
+    exam_id: Optional[str] = None,
+    limit: int = 200,
+    offset: int = 0,
+) -> List[Dict[str, Any]]:
+    limit = max(1, min(1000, int(limit)))
+    offset = max(0, int(offset))
+    with psycopg.connect(_connection_dsn(), row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            if exam_id:
+                cur.execute(
+                    """
+                    SELECT id, filename, path, exam_id, created_at
+                    FROM public.sheets
+                    WHERE exam_id = %s
+                    ORDER BY created_at DESC
+                    LIMIT %s OFFSET %s
+                    """,
+                    (exam_id, limit, offset),
+                )
+            else:
+                cur.execute(
+                    """
+                    SELECT id, filename, path, exam_id, created_at
+                    FROM public.sheets
+                    ORDER BY created_at DESC
+                    LIMIT %s OFFSET %s
+                    """,
+                    (limit, offset),
+                )
+            rows = cur.fetchall()
+    out: List[Dict[str, Any]] = []
+    for row in rows:
+        d = dict(row)
+        if d.get("created_at") is not None:
+            d["created_at"] = str(d["created_at"])
+        out.append(d)
+    return out
 
 
 def insert_answer_key(
@@ -375,13 +422,12 @@ def list_answer_keys(exam_id: str) -> List[Dict[str, Any]]:
     out: List[Dict[str, Any]] = []
     for row in rows:
         item = dict(row)
+        # pgvector/psycopg may yield numpy scalars; JSON needs plain Python float.
         emb = item.get("embedding")
-        if isinstance(emb, (list, tuple)):
-            item["embedding"] = [float(x) for x in emb]
-        elif emb is None:
+        if emb is None:
             item["embedding"] = []
         else:
-            item["embedding"] = list(emb)
+            item["embedding"] = [float(x) for x in emb]
         ro = item.get("rubric_override")
         if isinstance(ro, str):
             item["rubric_override"] = json.loads(ro) if ro else None
@@ -457,6 +503,140 @@ def get_result(result_id: str) -> Optional[Dict[str, Any]]:
     if d.get("created_at") is not None:
         d["created_at"] = str(d["created_at"])
     return d
+
+
+def list_results(
+    *,
+    exam_id: Optional[str] = None,
+    sheet_id: Optional[str] = None,
+    limit: int = 200,
+    offset: int = 0,
+) -> List[Dict[str, Any]]:
+    limit = max(1, min(1000, int(limit)))
+    offset = max(0, int(offset))
+    clauses: List[str] = []
+    args: List[Any] = []
+    if exam_id:
+        clauses.append("exam_id = %s")
+        args.append(exam_id)
+    if sheet_id:
+        clauses.append("sheet_id = %s")
+        args.append(sheet_id)
+    where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    sql = f"""
+        SELECT id, sheet_id, exam_id, total_marks, max_total, confidence_flag,
+               grading_confidence, prompt_hash, llm_model, flags, created_at
+        FROM public.evaluation_results
+        {where_sql}
+        ORDER BY created_at DESC
+        LIMIT %s OFFSET %s
+    """
+    args.extend([limit, offset])
+    with psycopg.connect(_connection_dsn(), row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, tuple(args))
+            rows = cur.fetchall()
+    out: List[Dict[str, Any]] = []
+    for row in rows:
+        d = dict(row)
+        d["flags"] = _coerce_json_field(d.get("flags"))
+        if not isinstance(d.get("flags"), list):
+            d["flags"] = []
+        d["confidence_flag"] = bool(d.get("confidence_flag"))
+        if d.get("created_at") is not None:
+            d["created_at"] = str(d["created_at"])
+        out.append(d)
+    return out
+
+
+def list_exams_with_counts(limit: int = 500) -> List[Dict[str, Any]]:
+    limit = max(1, min(2000, int(limit)))
+    with psycopg.connect(_connection_dsn(), row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                WITH exams AS (
+                    SELECT exam_id FROM public.answer_keys
+                    UNION
+                    SELECT exam_id FROM public.sheets WHERE exam_id IS NOT NULL
+                    UNION
+                    SELECT exam_id FROM public.evaluation_results
+                )
+                SELECT
+                    e.exam_id AS exam_id,
+                    e.exam_id AS title,
+                    COALESCE(ak.key_count, 0) AS key_count,
+                    COALESCE(sh.sheet_count, 0) AS sheet_count,
+                    ev.last_eval_at AS last_eval_at
+                FROM exams e
+                LEFT JOIN (
+                    SELECT exam_id, COUNT(*)::int AS key_count
+                    FROM public.answer_keys
+                    GROUP BY exam_id
+                ) ak ON ak.exam_id = e.exam_id
+                LEFT JOIN (
+                    SELECT exam_id, COUNT(*)::int AS sheet_count
+                    FROM public.sheets
+                    WHERE exam_id IS NOT NULL
+                    GROUP BY exam_id
+                ) sh ON sh.exam_id = e.exam_id
+                LEFT JOIN (
+                    SELECT exam_id, MAX(created_at) AS last_eval_at
+                    FROM public.evaluation_results
+                    GROUP BY exam_id
+                ) ev ON ev.exam_id = e.exam_id
+                ORDER BY ev.last_eval_at DESC NULLS LAST, e.exam_id ASC
+                LIMIT %s
+                """,
+                (limit,),
+            )
+            rows = cur.fetchall()
+    out: List[Dict[str, Any]] = []
+    for row in rows:
+        d = dict(row)
+        if d.get("last_eval_at") is not None:
+            d["last_eval_at"] = str(d["last_eval_at"])
+        out.append(d)
+    return out
+
+
+def metrics_overview() -> Dict[str, Any]:
+    with psycopg.connect(_connection_dsn(), row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    (SELECT COUNT(*)::int FROM public.sheets) AS sheets,
+                    (SELECT COUNT(*)::int FROM public.answer_keys) AS keys,
+                    (SELECT COUNT(*)::int FROM public.evaluation_results) AS results,
+                    (SELECT COUNT(DISTINCT exam_id)::int FROM (
+                        SELECT exam_id FROM public.answer_keys
+                        UNION
+                        SELECT exam_id FROM public.sheets WHERE exam_id IS NOT NULL
+                        UNION
+                        SELECT exam_id FROM public.evaluation_results
+                    ) x) AS exams,
+                    (SELECT COUNT(*)::int FROM public.evaluation_results
+                     WHERE created_at >= NOW() - INTERVAL '24 hours') AS last_24h,
+                    (SELECT COALESCE(AVG(
+                        CASE WHEN max_total > 0 THEN total_marks / max_total ELSE 0 END
+                    ), 0.0) FROM public.evaluation_results) AS avg_total_pct,
+                    (SELECT COALESCE(AVG(
+                        CASE WHEN confidence_flag THEN 1.0 ELSE 0.0 END
+                    ), 0.0) FROM public.evaluation_results) AS low_confidence_rate
+                """
+            )
+            row = cur.fetchone()
+    d = dict(row or {})
+    return {
+        "sheets": int(d.get("sheets") or 0),
+        "keys": int(d.get("keys") or 0),
+        "results": int(d.get("results") or 0),
+        "exams": int(d.get("exams") or 0),
+        "last_24h": int(d.get("last_24h") or 0),
+        "avg_total_pct": float(d.get("avg_total_pct") or 0.0),
+        "low_confidence_rate": float(d.get("low_confidence_rate") or 0.0),
+    }
 
 
 def upsert_rag_chunks_batch(rows: List[Dict[str, Any]]) -> int:
@@ -559,3 +739,40 @@ def delete_rag_chunks_for_document(document_id: str) -> int:
             n = cur.rowcount or 0
         conn.commit()
     return n
+
+
+def get_rag_chunks_for_sheet(sheet_id: str, limit: int = 500) -> List[Dict[str, Any]]:
+    """
+    Best-effort chunk lookup for a sheet by matching rag_chunks.meta->>'source_path' to sheets.path.
+    """
+    limit = max(1, min(2000, int(limit)))
+    with psycopg.connect(_connection_dsn(), row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT path FROM public.sheets WHERE id = %s", (sheet_id,))
+            s = cur.fetchone()
+            if not s:
+                return []
+            path = s.get("path")
+            if not path:
+                return []
+            cur.execute(
+                """
+                SELECT chunk_id, document_id, chunk_index, text_content, meta, created_at
+                FROM public.rag_chunks
+                WHERE COALESCE(meta->>'source_path', '') = %s
+                ORDER BY chunk_index ASC
+                LIMIT %s
+                """,
+                (str(path), limit),
+            )
+            rows = cur.fetchall()
+    out: List[Dict[str, Any]] = []
+    for row in rows:
+        d = dict(row)
+        m = d.get("meta")
+        if isinstance(m, str):
+            d["meta"] = json.loads(m) if m else {}
+        if d.get("created_at") is not None:
+            d["created_at"] = str(d["created_at"])
+        out.append(d)
+    return out
