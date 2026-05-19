@@ -23,7 +23,10 @@ def test_confidence_aggregation():
 
 def test_evaluate_pipeline_smoke(monkeypatch):
     # fake sheet and keys
-    monkeypatch.setattr("autograder.api.get_sheet", lambda _id: {"id": _id, "path": "fake.png"})
+    monkeypatch.setattr(
+        "autograder.api.get_sheet",
+        lambda _id: {"id": _id, "path": "fake.png", "exam_id": "exam-1"},
+    )
     monkeypatch.setattr(
         "autograder.api.list_answer_keys",
         lambda exam_id: [

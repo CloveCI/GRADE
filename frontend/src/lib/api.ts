@@ -49,18 +49,30 @@ async function req(path: string, init?: RequestInit) {
   return res;
 }
 
+function guessMime(filename: string): string | undefined {
+  const n = filename.toLowerCase();
+  if (n.endsWith(".pdf")) return "application/pdf";
+  if (n.endsWith(".png")) return "image/png";
+  if (n.endsWith(".jpg") || n.endsWith(".jpeg")) return "image/jpeg";
+  if (n.endsWith(".webp")) return "image/webp";
+  if (n.endsWith(".gif")) return "image/gif";
+  return undefined;
+}
+
 function mapSheet(r: Record<string, any>): Sheet {
+  const id = String(r.id);
+  const filename = String(r.filename || id);
   return {
-    id: String(r.id),
-    filename: String(r.filename || r.id),
+    id,
+    filename,
     examId: (r.exam_id ?? r.examId ?? null) as string | null,
     ocrEngine: ((r.ocr_engine || "tesseract") as "tesseract" | "easyocr" | "paddle"),
     status: ((r.status || "uploaded") as "uploaded" | "ingested" | "evaluated"),
     createdAt: String(r.created_at || r.createdAt || new Date().toISOString()),
     pageCount: Number(r.page_count || r.pageCount || 1),
-    documentId: String(r.document_id || r.documentId || `doc_${String(r.id).slice(0, 8)}`),
-    fileUrl: `${API_BASE}/sheet/${encodeURIComponent(String(r.id))}/file`,
-    mimeType: undefined,
+    documentId: String(r.document_id || r.documentId || `sheet_${id}`),
+    fileUrl: `${API_BASE}/sheet/${encodeURIComponent(id)}/file`,
+    mimeType: guessMime(filename),
   };
 }
 
@@ -152,6 +164,28 @@ export const api = {
     return { id: id || "exam", title, createdAt: new Date().toISOString() };
   },
 
+  async uploadKeyFile(
+    examId: string,
+    file: File,
+    defaultMaxMarks = 4,
+  ): Promise<{ keyIds: string[] }> {
+    const fd = new FormData();
+    fd.append("file", file);
+    fd.append("exam_id", examId);
+    fd.append("default_max_marks", String(defaultMaxMarks));
+    const r = await req("/upload/key/file", { method: "POST", body: fd });
+    const out = (await r.json()) as { key_ids: string[] };
+    return { keyIds: out.key_ids };
+  },
+
+  async ingestExamRag(examId: string, sheetId?: string): Promise<Record<string, unknown>> {
+    const q = sheetId ? `?sheet_id=${encodeURIComponent(sheetId)}` : "";
+    const r = await req(`/api/exam/${encodeURIComponent(examId)}/ingest-rag${q}`, {
+      method: "POST",
+    });
+    return (await r.json()) as Record<string, unknown>;
+  },
+
   async createKeys(
     examId: string,
     rows: Array<{ questionId: string; prompt: string; answer: string; maxMarks: number }>,
@@ -195,6 +229,14 @@ export const api = {
     return rows.find((x) => x.id === sheetId) ?? null;
   },
 
+  async ingestSheet(sheetId: string, force = true): Promise<Record<string, unknown>> {
+    const r = await req(
+      `/api/sheet/${encodeURIComponent(sheetId)}/ingest?force=${force ? "true" : "false"}`,
+      { method: "POST" },
+    );
+    return (await r.json()) as Record<string, unknown>;
+  },
+
   async getSheetChunks(sheetId: string): Promise<RagChunk[]> {
     const r = await req(`/api/sheet/${encodeURIComponent(sheetId)}/chunks`);
     const rows = (await r.json()) as Array<Record<string, any>>;
@@ -211,6 +253,34 @@ export const api = {
     }));
   },
 
+  async uploadExamBundle(input: {
+    examId: string;
+    keyFile: File;
+    sheetFile: File;
+    defaultMaxMarks?: number;
+  }): Promise<{ examId: string; keyIds: string[]; sheetId: string; filename: string }> {
+    const fd = new FormData();
+    fd.append("exam_id", input.examId);
+    fd.append("key_file", input.keyFile);
+    fd.append("sheet_file", input.sheetFile);
+    if (input.defaultMaxMarks != null) {
+      fd.append("default_max_marks", String(input.defaultMaxMarks));
+    }
+    const r = await req("/upload/exam-bundle", { method: "POST", body: fd });
+    const out = (await r.json()) as {
+      exam_id: string;
+      key_ids: string[];
+      sheet_id: string;
+      filename: string;
+    };
+    return {
+      examId: out.exam_id,
+      keyIds: out.key_ids,
+      sheetId: out.sheet_id,
+      filename: out.filename,
+    };
+  },
+
   async createSheet(input: {
     filename: string;
     examId: string | null;
@@ -222,11 +292,11 @@ export const api = {
     fd.append("file", input.file);
     if (input.examId) fd.append("exam_id", input.examId);
     const r = await req("/upload/sheet", { method: "POST", body: fd });
-    const out = (await r.json()) as { sheet_id: string; filename: string };
+    const out = (await r.json()) as { sheet_id: string; filename: string; exam_id?: string };
     return mapSheet({
       id: out.sheet_id,
       filename: out.filename,
-      exam_id: input.examId,
+      exam_id: out.exam_id ?? input.examId,
       page_count: input.pageCount || 1,
       status: "uploaded",
       ocr_engine: "unknown",

@@ -1,5 +1,5 @@
-import { useMemo, useState } from "react";
-import { useNavigate, useParams, useSearchParams } from "react-router-dom";
+import { useEffect, useMemo, useState } from "react";
+import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Loader2 } from "lucide-react";
 import { toast } from "sonner";
@@ -11,6 +11,13 @@ import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { api } from "@/lib/api";
 
 export default function Evaluate() {
@@ -26,7 +33,38 @@ export default function Evaluate() {
   const [useConsensusOcr, setUseConsensusOcr] = useState(false);
   const [expectedRegions, setExpectedRegions] = useState("");
 
-  const canRun = useMemo(() => sheetId.trim() && examId.trim(), [sheetId, examId]);
+  const { data: exams } = useQuery({ queryKey: ["exams"], queryFn: api.listExams });
+  const { data: sheets } = useQuery({ queryKey: ["sheets"], queryFn: () => api.listSheets() });
+
+  useEffect(() => {
+    if (routeSheetId) setSheetId(routeSheetId);
+    const ex = search.get("exam") || search.get("exam_id");
+    if (ex) setExamId(ex);
+  }, [routeSheetId, search]);
+
+  const sheetsForExam = useMemo(() => {
+    if (!examId) return sheets ?? [];
+    return (sheets ?? []).filter((s) => s.examId === examId);
+  }, [sheets, examId]);
+
+  const selectedSheet = useMemo(
+    () => (sheets ?? []).find((s) => s.id === sheetId),
+    [sheets, sheetId],
+  );
+
+  useEffect(() => {
+    if (selectedSheet?.examId && !examId) {
+      setExamId(selectedSheet.examId);
+    }
+  }, [selectedSheet, examId]);
+
+  const examMismatch =
+    Boolean(selectedSheet?.examId && examId && selectedSheet.examId !== examId);
+
+  const canRun = useMemo(
+    () => sheetId.trim() && examId.trim() && !examMismatch,
+    [sheetId, examId, examMismatch],
+  );
 
   const { data: integrations } = useQuery({
     queryKey: ["integrations"],
@@ -51,16 +89,14 @@ export default function Evaluate() {
       navigate(`/results/${encodeURIComponent(r.id)}`);
       toast.success("Evaluation complete — opening result");
     },
-    onError: (e: Error) => {
-      toast.error(e.message);
-    },
+    onError: (e: Error) => toast.error(e.message),
   });
 
   return (
     <div className="space-y-6">
       <PageHeader
         title="Evaluate"
-        description="Run the real pipeline on the uploaded sheet and exam keys (OCR → scoring). Gemini runs on the API server when enabled there."
+        description="Run OCR, match keys, hybrid RAG (sheet + keys), and score via the API. Pick an ingested sheet linked to the same exam as your keys."
       />
 
       {llm && !geminiReady ? (
@@ -68,11 +104,8 @@ export default function Evaluate() {
           <AlertTitle>Gemini not fully enabled on the API</AlertTitle>
           <AlertDescription className="text-sm">
             Set <code className="rounded bg-muted px-1">GRADE_ENABLE_LLM=true</code> and{" "}
-            <code className="rounded bg-muted px-1">GRADE_GEMINI_API_KEY</code> (or{" "}
-            <code className="rounded bg-muted px-1">GEMINI_API_KEY</code>) in the{" "}
-            <strong>repository root</strong> <code className="rounded bg-muted px-1">.env</code>, install{" "}
-            <code className="rounded bg-muted px-1">google-generativeai</code>, then restart uvicorn. Evaluation still
-            runs using the server fallback scorer if LLM is off.
+            <code className="rounded bg-muted px-1">GRADE_GEMINI_API_KEY</code> in the repository root{" "}
+            <code className="rounded bg-muted px-1">.env</code>, then restart uvicorn. Fallback scoring still runs.
           </AlertDescription>
         </Alert>
       ) : null}
@@ -81,9 +114,17 @@ export default function Evaluate() {
         <Alert className="border-[hsl(var(--success))]/40 bg-[hsl(var(--success))]/5">
           <AlertTitle>Gemini ready</AlertTitle>
           <AlertDescription className="text-sm">
-            The API reports LLM + key present. Grading uses your configured model (default{" "}
-            <code className="rounded bg-muted px-1">gemini-2.0-flash</code> via{" "}
-            <code className="rounded bg-muted px-1">GRADE_LLM_MODEL</code> on the server).
+            Server reports LLM + API key present. Grading uses your configured Gemini model.
+          </AlertDescription>
+        </Alert>
+      ) : null}
+
+      {examMismatch ? (
+        <Alert variant="destructive">
+          <AlertTitle>Exam mismatch</AlertTitle>
+          <AlertDescription>
+            Sheet is linked to <strong>{selectedSheet?.examId}</strong> but you selected exam{" "}
+            <strong>{examId}</strong>. They must match.
           </AlertDescription>
         </Alert>
       ) : null}
@@ -94,7 +135,37 @@ export default function Evaluate() {
         </CardHeader>
         <CardContent className="grid gap-3 sm:grid-cols-2">
           <div className="space-y-2">
-            <Label htmlFor="sheet_id">Sheet ID</Label>
+            <Label>Exam</Label>
+            <Select value={examId} onValueChange={setExamId}>
+              <SelectTrigger>
+                <SelectValue placeholder="Select exam" />
+              </SelectTrigger>
+              <SelectContent>
+                {exams?.map((e) => (
+                  <SelectItem key={e.id} value={e.id}>
+                    {e.title} ({e.id})
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          <div className="space-y-2">
+            <Label>Sheet</Label>
+            <Select value={sheetId} onValueChange={setSheetId}>
+              <SelectTrigger>
+                <SelectValue placeholder="Select sheet" />
+              </SelectTrigger>
+              <SelectContent>
+                {(examId ? sheetsForExam : sheets)?.map((s) => (
+                  <SelectItem key={s.id} value={s.id}>
+                    {s.filename} {s.examId ? `· ${s.examId}` : "· no exam"}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          <div className="space-y-2 sm:col-span-2">
+            <Label htmlFor="sheet_id">Sheet ID (advanced)</Label>
             <Input
               id="sheet_id"
               value={sheetId}
@@ -102,9 +173,14 @@ export default function Evaluate() {
               placeholder="sheet_uuid"
             />
           </div>
-          <div className="space-y-2">
-            <Label htmlFor="exam_id">Exam ID</Label>
-            <Input id="exam_id" value={examId} onChange={(e) => setExamId(e.target.value)} placeholder="exam_id" />
+          <div className="space-y-2 sm:col-span-2">
+            <Label htmlFor="exam_id">Exam ID (advanced)</Label>
+            <Input
+              id="exam_id"
+              value={examId}
+              onChange={(e) => setExamId(e.target.value)}
+              placeholder="exam_id"
+            />
           </div>
           <div className="space-y-2 sm:col-span-2">
             <Label htmlFor="expected_regions">Expected answer regions (optional)</Label>
@@ -115,7 +191,6 @@ export default function Evaluate() {
               placeholder="Leave blank for auto"
               inputMode="numeric"
             />
-            <p className="text-xs text-muted-foreground">Passed to preprocess as hint when set.</p>
           </div>
           <div className="flex items-center space-x-2 sm:col-span-2">
             <Checkbox
@@ -143,7 +218,9 @@ export default function Evaluate() {
               disabled={!canRun || evaluateMutation.isPending}
               onClick={() => {
                 setDemoTimeline(true);
-                toast.message("Demo timeline", { description: "Synthetic UI only — use Run server evaluation for real OCR and Gemini." });
+                toast.message("Demo timeline", {
+                  description: "Synthetic UI only — use Run server evaluation for real grading.",
+                });
               }}
             >
               Demo timeline only
@@ -166,9 +243,12 @@ export default function Evaluate() {
       ) : (
         <Card>
           <CardContent className="py-8 text-sm text-muted-foreground">
-            Enter sheet and exam IDs from your ingested data, then <strong>Run server evaluation</strong>. The API
-            loads the stored PDF, runs OCR, matches keys from Postgres, scores with Gemini when enabled, and saves the
-            result for this results page and PDF export.
+            Upload keys and a sheet with the same <strong>exam_id</strong> (try{" "}
+            <Link to="/upload/bundle" className="text-primary underline">
+              Upload bundle
+            </Link>
+            ), then run server evaluation. RAG pulls chunks from both <code>keys_&#123;exam&#125;</code> and{" "}
+            <code>sheet_&#123;id&#125;</code>.
           </CardContent>
         </Card>
       )}

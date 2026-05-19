@@ -32,6 +32,19 @@ const blank = (i: number): KeyDraft => ({
   maxMarks: 4,
 });
 
+function parseKeyJson(text: string): KeyDraft[] {
+  const parsed = JSON.parse(text) as Record<string, unknown>;
+  const arr = Array.isArray(parsed)
+    ? parsed
+    : (parsed.questions as unknown[]) ?? [];
+  return (arr as Record<string, unknown>[]).map((row, i) => ({
+    questionId: String(row.question_id ?? row.questionId ?? row.id ?? `Q${i + 1}`),
+    prompt: String(row.prompt ?? row.question ?? row.question_id ?? row.questionId ?? ""),
+    answer: String(row.expected_answer ?? row.answer ?? row.expected ?? ""),
+    maxMarks: Number(row.max_marks ?? row.maxMarks ?? row.max ?? 4),
+  }));
+}
+
 export default function KeyNew() {
   const navigate = useNavigate();
   const qc = useQueryClient();
@@ -41,38 +54,33 @@ export default function KeyNew() {
   const [examId, setExamId] = useState<string>("");
   const [newExamTitle, setNewExamTitle] = useState("");
   const [drafts, setDrafts] = useState<KeyDraft[]>([blank(0)]);
+  const [keyFile, setKeyFile] = useState<File | null>(null);
+  const [defaultMaxMarks, setDefaultMaxMarks] = useState(4);
 
   const handleJson = async (file: File) => {
     try {
       const text = await file.text();
-      const parsed = JSON.parse(text);
-      const arr = Array.isArray(parsed) ? parsed : parsed.questions ?? [];
-      const next: KeyDraft[] = arr.map((row: Record<string, unknown>, i: number) => ({
-        questionId: String(row.questionId ?? row.id ?? `Q${i + 1}`),
-        prompt: String(row.prompt ?? row.question ?? ""),
-        answer: String(row.answer ?? row.expected ?? ""),
-        maxMarks: Number(row.maxMarks ?? row.max ?? 4),
-      }));
+      const next = parseKeyJson(text);
       if (next.length === 0) throw new Error("Empty key file");
       setDrafts(next);
-      toast.success(`Parsed ${next.length} questions from JSON`);
+      setKeyFile(file);
+      toast.success(`Parsed ${next.length} questions — will upload to server on save`);
     } catch {
-      toast.error("Could not parse JSON. Expected an array of {questionId, prompt, answer, maxMarks}.");
+      toast.error(
+        "Could not parse JSON. Use { exam_id, questions: [{ question_id, expected_answer, max_marks }] }.",
+      );
     }
   };
 
-  const handlePdf = (file: File) => {
-    const sizeKb = Math.max(1, Math.round(file.size / 1024));
-    const guessed = Math.min(8, Math.max(2, Math.round(sizeKb / 30)));
-    setDrafts(Array.from({ length: guessed }, (_, i) => blank(i)));
-    toast.message(`PDF received (${sizeKb} KB)`, {
-      description: `Mock parse: created ${guessed} blank questions to fill in.`,
-    });
-  };
-
   const onUpload = (file: File) => {
-    if (file.type === "application/json" || file.name.endsWith(".json")) handleJson(file);
-    else handlePdf(file);
+    setKeyFile(file);
+    if (file.type === "application/json" || file.name.endsWith(".json")) {
+      void handleJson(file);
+    } else {
+      toast.message(`PDF selected: ${file.name}`, {
+        description: "Saved on server when you click Save keys (requires exam_id).",
+      });
+    }
   };
 
   const create = useMutation({
@@ -84,16 +92,30 @@ export default function KeyNew() {
         targetExamId = exam.id;
       }
       if (!targetExamId) throw new Error("Pick an exam");
-      const valid = drafts.filter((d) => d.prompt.trim() && d.answer.trim());
-      if (valid.length === 0) throw new Error("Add at least one question with prompt + answer");
-      await api.createKeys(targetExamId, valid);
+
+      if (keyFile) {
+        await api.uploadKeyFile(targetExamId, keyFile, defaultMaxMarks);
+        return targetExamId;
+      }
+
+      const valid = drafts.filter((d) => d.answer.trim());
+      if (valid.length === 0) throw new Error("Add at least one question with an expected answer");
+      await api.createKeys(
+        targetExamId,
+        valid.map((d) => ({
+          questionId: d.questionId,
+          prompt: d.prompt || d.questionId,
+          answer: d.answer,
+          maxMarks: d.maxMarks,
+        })),
+      );
       return targetExamId;
     },
     onSuccess: (targetExamId) => {
       qc.invalidateQueries({ queryKey: ["exams"] });
       qc.invalidateQueries({ queryKey: ["exams-with-counts"] });
       qc.invalidateQueries({ queryKey: ["exam", targetExamId] });
-      toast.success("Keys saved");
+      toast.success("Keys saved and indexed for RAG");
       navigate(`/keys/${targetExamId}`);
     },
     onError: (e: Error) => toast.error(e.message),
@@ -101,7 +123,10 @@ export default function KeyNew() {
 
   return (
     <div className="mx-auto max-w-3xl space-y-6">
-      <PageHeader title="New keys" description="Upload a JSON file or fill questions manually." />
+      <PageHeader
+        title="New keys"
+        description="Upload JSON/PDF to the API (indexed as keys_{exam_id}) or enter questions manually."
+      />
 
       <Card>
         <CardHeader>
@@ -152,12 +177,12 @@ export default function KeyNew() {
       <Card>
         <CardHeader className="flex-row items-center justify-between">
           <CardTitle className="text-base">Upload key file</CardTitle>
-          <Badge variant="outline">JSON or PDF</Badge>
+          <Badge variant="outline">JSON or PDF → API</Badge>
         </CardHeader>
-        <CardContent>
+        <CardContent className="space-y-3">
           <label className="flex cursor-pointer items-center justify-center gap-2 rounded-md border border-dashed border-border bg-muted/20 px-4 py-8 text-sm text-muted-foreground hover:bg-muted/40">
             <Upload className="h-4 w-4" />
-            <span>Drop or click to upload (parsed in-browser)</span>
+            <span>{keyFile ? keyFile.name : "Drop or click to upload"}</span>
             <input
               type="file"
               accept=".json,application/json,application/pdf"
@@ -168,6 +193,16 @@ export default function KeyNew() {
               }}
             />
           </label>
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-muted-foreground">PDF default marks</span>
+            <Input
+              type="number"
+              min={1}
+              className="w-24"
+              value={defaultMaxMarks}
+              onChange={(e) => setDefaultMaxMarks(Number(e.target.value) || 4)}
+            />
+          </div>
         </CardContent>
       </Card>
 
@@ -179,70 +214,77 @@ export default function KeyNew() {
             variant="outline"
             size="sm"
             onClick={() => setDrafts((d) => [...d, blank(d.length)])}
+            disabled={Boolean(keyFile?.name.endsWith(".pdf"))}
           >
             <Plus className="mr-1 h-4 w-4" /> Add question
           </Button>
         </CardHeader>
         <CardContent className="space-y-3">
-          {drafts.map((d, i) => (
-            <div
-              key={i}
-              className="grid gap-2 rounded-md border bg-card p-3 sm:grid-cols-[80px_1fr_80px_auto]"
-            >
-              <Input
-                value={d.questionId}
-                onChange={(e) =>
-                  setDrafts((arr) =>
-                    arr.map((x, j) => (j === i ? { ...x, questionId: e.target.value } : x)),
-                  )
-                }
-                aria-label="Question ID"
-              />
-              <div className="space-y-2">
-                <Input
-                  placeholder="Prompt"
-                  value={d.prompt}
-                  onChange={(e) =>
-                    setDrafts((arr) =>
-                      arr.map((x, j) => (j === i ? { ...x, prompt: e.target.value } : x)),
-                    )
-                  }
-                />
-                <Textarea
-                  placeholder="Expected answer"
-                  value={d.answer}
-                  rows={2}
-                  onChange={(e) =>
-                    setDrafts((arr) =>
-                      arr.map((x, j) => (j === i ? { ...x, answer: e.target.value } : x)),
-                    )
-                  }
-                />
-              </div>
-              <Input
-                type="number"
-                min={1}
-                value={d.maxMarks}
-                onChange={(e) =>
-                  setDrafts((arr) =>
-                    arr.map((x, j) =>
-                      j === i ? { ...x, maxMarks: Number(e.target.value) } : x,
-                    ),
-                  )
-                }
-                aria-label="Max marks"
-              />
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon"
-                onClick={() => setDrafts((arr) => arr.filter((_, j) => j !== i))}
-                disabled={drafts.length === 1}
+          {keyFile?.name.endsWith(".pdf") ? (
+            <p className="text-sm text-muted-foreground">
+              PDF keys are parsed on the server. Clear the file above to edit questions manually.
+            </p>
+          ) : (
+            drafts.map((d, i) => (
+              <div
+                key={i}
+                className="grid gap-2 rounded-md border bg-card p-3 sm:grid-cols-[80px_1fr_80px_auto]"
               >
-                <Trash2 className="h-4 w-4" />
-              </Button>
-            </div>
-          ))}
+                <Input
+                  value={d.questionId}
+                  onChange={(e) =>
+                    setDrafts((arr) =>
+                      arr.map((x, j) => (j === i ? { ...x, questionId: e.target.value } : x)),
+                    )
+                  }
+                  aria-label="Question ID"
+                />
+                <div className="space-y-2">
+                  <Input
+                    placeholder="Prompt (optional)"
+                    value={d.prompt}
+                    onChange={(e) =>
+                      setDrafts((arr) =>
+                        arr.map((x, j) => (j === i ? { ...x, prompt: e.target.value } : x)),
+                      )
+                    }
+                  />
+                  <Textarea
+                    placeholder="Expected answer"
+                    value={d.answer}
+                    rows={2}
+                    onChange={(e) =>
+                      setDrafts((arr) =>
+                        arr.map((x, j) => (j === i ? { ...x, answer: e.target.value } : x)),
+                      )
+                    }
+                  />
+                </div>
+                <Input
+                  type="number"
+                  min={1}
+                  value={d.maxMarks}
+                  onChange={(e) =>
+                    setDrafts((arr) =>
+                      arr.map((x, j) =>
+                        j === i ? { ...x, maxMarks: Number(e.target.value) } : x,
+                      ),
+                    )
+                  }
+                  aria-label="Max marks"
+                />
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  onClick={() => setDrafts((arr) => arr.filter((_, j) => j !== i))}
+                  disabled={drafts.length === 1}
+                >
+                  <Trash2 className="h-4 w-4" />
+                </Button>
+              </div>
+            ))
+          )}
         </CardContent>
       </Card>
 

@@ -25,6 +25,16 @@ class UploadKeyResponse(BaseModel):
 class UploadSheetResponse(BaseModel):
     sheet_id: str
     filename: str
+    exam_id: Optional[str] = None
+
+
+class UploadExamBundleResponse(BaseModel):
+    exam_id: str
+    key_ids: List[str]
+    sheet_id: str
+    filename: str
+    keys_ingest: dict = Field(default_factory=dict)
+    sheet_ingest: dict = Field(default_factory=dict)
 
 
 class EvaluateRequest(BaseModel):

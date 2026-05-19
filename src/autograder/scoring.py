@@ -85,6 +85,7 @@ def _score_with_gemini(
     rubric_override: Optional[dict],
     model_id: str,
     api_key: str,
+    rag_context: Optional[str] = None,
 ) -> EvaluationResult:
     import google.generativeai as genai
 
@@ -109,6 +110,9 @@ Reference / model answer:
 
 Student answer (from OCR; reported OCR confidence {ocr_confidence:.2f}):
 {student_answer}
+
+Retrieved excerpts from this student's sheet (for grounding; may overlap OCR):
+{rag_context if rag_context else "(none)"}
 
 Rubric override (JSON, or null): {json.dumps(rubric_override) if rubric_override else "null"}
 """
@@ -137,6 +141,7 @@ def score_answer_llm(
     subject_domain: str,
     ocr_confidence: float,
     rubric_override: Optional[dict] = None,
+    rag_context: Optional[str] = None,
 ) -> tuple[EvaluationResult, str]:
     """
     Return (EvaluationResult, llm_model).
@@ -173,6 +178,7 @@ def score_answer_llm(
                 rubric_override=rubric_override,
                 model_id=model_name,
                 api_key=gkey,
+                rag_context=rag_context,
             )
             flags = list(res.flags)
             if "gemini_ok" not in flags:

@@ -6,9 +6,17 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { VectorPreview } from "@/components/VectorPreview";
-import { ArrowLeft, FileScan } from "lucide-react";
+import { useMutation } from "@tanstack/react-query";
+import { ArrowLeft, Database, FileScan, PlayCircle } from "lucide-react";
+import { toast } from "sonner";
 
 export default function KeyDetail({ examId }: { examId: string }) {
+  const reindex = useMutation({
+    mutationFn: () => api.ingestExamRag(examId),
+    onSuccess: () => toast.success("Answer keys re-indexed into RAG"),
+    onError: (e: Error) => toast.error(e.message),
+  });
+
   const { data, isLoading } = useQuery({
     queryKey: ["exam", examId],
     queryFn: () => api.getExam(examId),
@@ -29,6 +37,21 @@ export default function KeyDetail({ examId }: { examId: string }) {
       <PageHeader
         title={exam.title}
         description={`Exam ID: ${exam.id} · ${keys.length} key${keys.length === 1 ? "" : "s"}`}
+        actions={
+          <div className="flex flex-wrap gap-2">
+            <Button variant="outline" onClick={() => reindex.mutate()} disabled={reindex.isPending}>
+              <Database className="mr-1 h-4 w-4" />
+              Re-index keys RAG
+            </Button>
+            {sheets[0] ? (
+              <Button asChild>
+                <Link to={`/evaluate/${sheets[0].id}?exam=${exam.id}`}>
+                  <PlayCircle className="mr-1 h-4 w-4" /> Evaluate first sheet
+                </Link>
+              </Button>
+            ) : null}
+          </div>
+        }
       />
 
       <div className="grid gap-4 lg:grid-cols-[1fr_320px]">

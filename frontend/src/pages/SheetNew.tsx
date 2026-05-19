@@ -22,7 +22,11 @@ export default function SheetNew() {
   const [params] = useSearchParams();
   const { data: exams } = useQuery({ queryKey: ["exams"], queryFn: api.listExams });
 
+  const [examMode, setExamMode] = useState<"existing" | "new">(
+    params.get("exam") ? "existing" : "new",
+  );
   const [examId, setExamId] = useState<string>(params.get("exam") ?? "");
+  const [newExamTitle, setNewExamTitle] = useState("");
   const [file, setFile] = useState<File | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
 
@@ -35,10 +39,16 @@ export default function SheetNew() {
   const create = useMutation({
     mutationFn: async () => {
       if (!file) throw new Error("Pick a file");
-      if (!examId) throw new Error("Pick an exam");
+      let targetExamId = examId;
+      if (examMode === "new") {
+        if (!newExamTitle.trim()) throw new Error("Enter an exam title");
+        const exam = await api.createExam(newExamTitle.trim());
+        targetExamId = exam.id;
+      }
+      if (!targetExamId) throw new Error("Pick or create an exam");
       const sheet = await api.createSheet({
         filename: file.name,
-        examId,
+        examId: targetExamId,
         file,
         pageCount: file.type === "application/pdf" ? 2 : 1,
       });
@@ -65,19 +75,45 @@ export default function SheetNew() {
         <CardHeader>
           <CardTitle className="text-base">Exam link</CardTitle>
         </CardHeader>
-        <CardContent>
-          <Select value={examId} onValueChange={setExamId}>
-            <SelectTrigger>
-              <SelectValue placeholder="Select exam" />
-            </SelectTrigger>
-            <SelectContent>
-              {exams?.map((e) => (
-                <SelectItem key={e.id} value={e.id}>
-                  {e.title}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
+        <CardContent className="space-y-3">
+          <div className="flex gap-2">
+            <Button
+              type="button"
+              variant={examMode === "existing" ? "default" : "outline"}
+              size="sm"
+              onClick={() => setExamMode("existing")}
+            >
+              Existing exam
+            </Button>
+            <Button
+              type="button"
+              variant={examMode === "new" ? "default" : "outline"}
+              size="sm"
+              onClick={() => setExamMode("new")}
+            >
+              New exam
+            </Button>
+          </div>
+          {examMode === "existing" ? (
+            <Select value={examId} onValueChange={setExamId}>
+              <SelectTrigger>
+                <SelectValue placeholder="Select exam" />
+              </SelectTrigger>
+              <SelectContent>
+                {exams?.map((e) => (
+                  <SelectItem key={e.id} value={e.id}>
+                    {e.title}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          ) : (
+            <Input
+              placeholder="Exam title (same id as your keys)"
+              value={newExamTitle}
+              onChange={(e) => setNewExamTitle(e.target.value)}
+            />
+          )}
         </CardContent>
       </Card>
 

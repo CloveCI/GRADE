@@ -13,6 +13,7 @@ import Evaluate from "./pages/Evaluate.tsx";
 import Results from "./pages/Results.tsx";
 import Metrics from "./pages/Metrics.tsx";
 import RagExplorer from "./pages/RagExplorer.tsx";
+import UploadBundle from "./pages/UploadBundle.tsx";
 import NotFound from "./pages/NotFound.tsx";
 
 const queryClient = new QueryClient();
@@ -26,6 +27,7 @@ const App = () => (
         <Routes>
           <Route element={<AppLayout />}>
             <Route path="/" element={<Index />} />
+            <Route path="/upload/bundle" element={<UploadBundle />} />
             <Route path="/keys" element={<Keys />} />
             <Route path="/keys/new" element={<KeyNew />} />
             <Route path="/keys/:examId" element={<Keys />} />

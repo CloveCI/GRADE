@@ -8,6 +8,7 @@ import {
   BarChart3,
   Search,
   GraduationCap,
+  Package,
 } from "lucide-react";
 
 import {
@@ -29,6 +30,7 @@ const primaryNav = [
 ];
 
 const portalNav = [
+  { title: "Upload bundle", url: "/upload/bundle", icon: Package },
   { title: "Keys", url: "/keys", icon: KeyRound },
   { title: "Sheets", url: "/sheets", icon: FileScan },
   { title: "Evaluate", url: "/evaluate", icon: PlayCircle },

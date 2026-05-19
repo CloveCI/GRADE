@@ -76,7 +76,11 @@ def test_upload_sheet_and_evaluate_roundtrip(client, synthetic_binary_sheet, mon
     sheet_path = tmp_path / "s.png"
     cv2.imwrite(str(sheet_path), synthetic_binary_sheet)
     with sheet_path.open("rb") as fh:
-        r1 = client.post("/upload/sheet", files={"file": ("s.png", fh, "image/png")})
+        r1 = client.post(
+            "/upload/sheet",
+            files={"file": ("s.png", fh, "image/png")},
+            data={"exam_id": exam_id},
+        )
     assert r1.status_code == 200
     sheet_id = r1.json()["sheet_id"]
 

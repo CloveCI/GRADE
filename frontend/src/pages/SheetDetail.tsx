@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import { api } from "@/lib/api";
 import { PageHeader } from "@/components/PageHeader";
@@ -7,11 +7,34 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { ChunkPreview } from "@/components/ChunkPreview";
 import { RagSearchPanel } from "@/components/RagSearchPanel";
-import { ArrowLeft, FileScan, PlayCircle } from "lucide-react";
+import { ArrowLeft, FileScan, PlayCircle, RefreshCw, Database } from "lucide-react";
+import { toast } from "sonner";
 
 export default function SheetDetail({ sheetId }: { sheetId: string }) {
+  const queryClient = useQueryClient();
   const { data: sheet } = useQuery({ queryKey: ["sheet", sheetId], queryFn: () => api.getSheet(sheetId) });
   const { data: chunks } = useQuery({ queryKey: ["sheet-chunks", sheetId], queryFn: () => api.getSheetChunks(sheetId) });
+  const ingest = useMutation({
+    mutationFn: () => api.ingestSheet(sheetId, true),
+    onSuccess: (res) => {
+      queryClient.invalidateQueries({ queryKey: ["sheet-chunks", sheetId] });
+      toast.success(`RAG ingest: ${String(res.status ?? "done")} (${res.chunks_saved ?? "?"} chunks)`);
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
+
+  const ingestExam = useMutation({
+    mutationFn: () => {
+      const ex = sheet?.examId;
+      if (!ex) throw new Error("Sheet has no exam_id");
+      return api.ingestExamRag(ex, sheetId);
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["sheet-chunks", sheetId] });
+      toast.success("Re-indexed keys + sheet RAG corpora");
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
 
   if (!sheet) return <p className="text-sm text-muted-foreground">Loading…</p>;
 
@@ -26,13 +49,29 @@ export default function SheetDetail({ sheetId }: { sheetId: string }) {
         title={sheet.filename}
         description={`${sheet.id} · ${sheet.pageCount} page${sheet.pageCount === 1 ? "" : "s"}`}
         actions={
-          sheet.examId ? (
-            <Button asChild>
-              <Link to={`/evaluate/${sheet.id}?exam=${sheet.examId}`}>
-                <PlayCircle className="mr-1 h-4 w-4" /> Evaluate
-              </Link>
+          <div className="flex flex-wrap gap-2">
+            <Button variant="outline" onClick={() => ingest.mutate()} disabled={ingest.isPending}>
+              <RefreshCw className={`mr-1 h-4 w-4 ${ingest.isPending ? "animate-spin" : ""}`} />
+              Ingest sheet
             </Button>
-          ) : null
+            {sheet.examId ? (
+              <Button
+                variant="outline"
+                onClick={() => ingestExam.mutate()}
+                disabled={ingestExam.isPending}
+              >
+                <Database className={`mr-1 h-4 w-4 ${ingestExam.isPending ? "animate-pulse" : ""}`} />
+                Re-index exam RAG
+              </Button>
+            ) : null}
+            {sheet.examId ? (
+              <Button asChild>
+                <Link to={`/evaluate/${sheet.id}?exam=${sheet.examId}`}>
+                  <PlayCircle className="mr-1 h-4 w-4" /> Evaluate
+                </Link>
+              </Button>
+            ) : null}
+          </div>
         }
       />
 
@@ -53,6 +92,9 @@ export default function SheetDetail({ sheetId }: { sheetId: string }) {
                 </div>
               )}
               <div className="mt-3 flex flex-wrap gap-2 text-xs text-muted-foreground">
+                {sheet.examId ? (
+                  <Badge variant="secondary">exam: {sheet.examId}</Badge>
+                ) : null}
                 <Badge variant="outline">document_id: {sheet.documentId}</Badge>
                 <Badge variant="outline" className="capitalize">engine: {sheet.ocrEngine}</Badge>
                 <Badge variant="outline" className="capitalize">status: {sheet.status}</Badge>
@@ -83,7 +125,7 @@ export default function SheetDetail({ sheetId }: { sheetId: string }) {
             <CardTitle className="text-base">Search this sheet</CardTitle>
           </CardHeader>
           <CardContent>
-            <RagSearchPanel sheetId={sheet.id} compact />
+            <RagSearchPanel sheetId={sheet.id} examId={sheet.examId ?? undefined} compact />
           </CardContent>
         </Card>
       </div>

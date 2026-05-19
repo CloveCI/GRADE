@@ -165,14 +165,21 @@ def _backfill_answer_keys_sort_order_natural(conn) -> None:
     with conn.cursor() as cur:
         cur.execute("SELECT DISTINCT exam_id FROM public.answer_keys")
         exams = cur.fetchall()
-        for (exam_id,) in exams:
+        for row in exams:
+            exam_id = row["exam_id"] if isinstance(row, dict) else row[0]
             cur.execute(
                 "SELECT id, question_id FROM public.answer_keys WHERE exam_id = %s",
                 (exam_id,),
             )
             rows = cur.fetchall()
-            ordered = sorted(rows, key=lambda r: _natural_question_id_key(r[1]))
-            for i, (row_id, _) in enumerate(ordered):
+            ordered = sorted(
+                rows,
+                key=lambda r: _natural_question_id_key(
+                    r["question_id"] if isinstance(r, dict) else r[1]
+                ),
+            )
+            for i, row in enumerate(ordered):
+                row_id = row["id"] if isinstance(row, dict) else row[0]
                 cur.execute(
                     "UPDATE public.answer_keys SET sort_order = %s WHERE id = %s",
                     (i, row_id),
@@ -273,6 +280,11 @@ CREATE INDEX IF NOT EXISTS idx_rag_chunks_document_id
 CREATE INDEX IF NOT EXISTS idx_rag_chunks_embedding_hnsw
     ON public.rag_chunks
     USING hnsw (embedding vector_cosine_ops)
+""".strip(),
+    """
+CREATE INDEX IF NOT EXISTS idx_rag_chunks_text_fts
+    ON public.rag_chunks
+    USING gin (to_tsvector('english', text_content))
 """.strip(),
 ]
 
@@ -679,11 +691,148 @@ def upsert_rag_chunks_batch(rows: List[Dict[str, Any]]) -> int:
     return n
 
 
+def _resolve_document_ids(
+    document_id: Optional[str] = None,
+    document_ids: Optional[List[str]] = None,
+) -> Optional[List[str]]:
+    out: List[str] = []
+    if document_ids:
+        for d in document_ids:
+            if d and d not in out:
+                out.append(d)
+    if document_id and document_id not in out:
+        out.append(document_id)
+    return out if out else None
+
+
+def search_rag_chunks_bm25(
+    query: str,
+    *,
+    top_k: int = 10,
+    document_id: Optional[str] = None,
+    document_ids: Optional[List[str]] = None,
+) -> List[Dict[str, Any]]:
+    """Keyword search on ``rag_chunks.text_content`` (requires ``idx_rag_chunks_text_fts``)."""
+    q = (query or "").strip()
+    if not q:
+        return []
+    top_k = max(1, min(100, int(top_k)))
+    doc_ids = _resolve_document_ids(document_id, document_ids)
+    with psycopg.connect(_connection_dsn(), row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            if doc_ids and len(doc_ids) == 1:
+                cur.execute(
+                    """
+                    SELECT chunk_id, document_id, chunk_index, text_content, meta,
+                           ts_rank_cd(
+                               to_tsvector('english', text_content),
+                               plainto_tsquery('english', %s)
+                           ) AS bm25_score
+                    FROM public.rag_chunks
+                    WHERE document_id = %s
+                      AND to_tsvector('english', text_content) @@ plainto_tsquery('english', %s)
+                    ORDER BY bm25_score DESC
+                    LIMIT %s
+                    """,
+                    (q, doc_ids[0], q, top_k),
+                )
+            elif doc_ids:
+                cur.execute(
+                    """
+                    SELECT chunk_id, document_id, chunk_index, text_content, meta,
+                           ts_rank_cd(
+                               to_tsvector('english', text_content),
+                               plainto_tsquery('english', %s)
+                           ) AS bm25_score
+                    FROM public.rag_chunks
+                    WHERE document_id = ANY(%s::text[])
+                      AND to_tsvector('english', text_content) @@ plainto_tsquery('english', %s)
+                    ORDER BY bm25_score DESC
+                    LIMIT %s
+                    """,
+                    (q, doc_ids, q, top_k),
+                )
+            else:
+                cur.execute(
+                    """
+                    SELECT chunk_id, document_id, chunk_index, text_content, meta,
+                           ts_rank_cd(
+                               to_tsvector('english', text_content),
+                               plainto_tsquery('english', %s)
+                           ) AS bm25_score
+                    FROM public.rag_chunks
+                    WHERE to_tsvector('english', text_content) @@ plainto_tsquery('english', %s)
+                    ORDER BY bm25_score DESC
+                    LIMIT %s
+                    """,
+                    (q, q, top_k),
+                )
+            rows = cur.fetchall()
+    out: List[Dict[str, Any]] = []
+    for row in rows:
+        d = dict(row)
+        m = d.get("meta")
+        if isinstance(m, str):
+            d["meta"] = json.loads(m) if m else {}
+        d["distance"] = 1.0 - min(1.0, float(d.get("bm25_score") or 0.0))
+        out.append(d)
+    return out
+
+
+def hybrid_search_rag_chunks(
+    query: str,
+    embedding: List[float],
+    *,
+    top_k: int = 5,
+    document_id: Optional[str] = None,
+    document_ids: Optional[List[str]] = None,
+    vector_weight: float = 0.65,
+) -> List[Dict[str, Any]]:
+    """
+    Merge vector ANN + BM25 ranks (reciprocal rank fusion style) for better sheet retrieval.
+    """
+    top_k = max(1, min(100, int(top_k)))
+    fetch_k = min(100, max(top_k * 3, top_k + 5))
+    doc_ids = _resolve_document_ids(document_id, document_ids)
+    vec_hits = search_rag_chunks(embedding, top_k=fetch_k, document_ids=doc_ids)
+    bm_hits = search_rag_chunks_bm25(query, top_k=fetch_k, document_ids=doc_ids)
+
+    scores: Dict[str, float] = {}
+    payload: Dict[str, Dict[str, Any]] = {}
+    k_rrf = 60.0
+
+    for rank, h in enumerate(vec_hits):
+        cid = str(h.get("chunk_id") or "")
+        if not cid:
+            continue
+        scores[cid] = scores.get(cid, 0.0) + vector_weight / (k_rrf + rank + 1)
+        payload[cid] = h
+
+    bm_w = 1.0 - vector_weight
+    for rank, h in enumerate(bm_hits):
+        cid = str(h.get("chunk_id") or "")
+        if not cid:
+            continue
+        scores[cid] = scores.get(cid, 0.0) + bm_w / (k_rrf + rank + 1)
+        if cid not in payload:
+            payload[cid] = h
+
+    ordered = sorted(scores.items(), key=lambda x: x[1], reverse=True)[:top_k]
+    out: List[Dict[str, Any]] = []
+    for cid, fused in ordered:
+        row = dict(payload[cid])
+        row["fused_score"] = fused
+        row["distance"] = 1.0 - fused
+        out.append(row)
+    return out
+
+
 def search_rag_chunks(
     embedding: List[float],
     *,
     top_k: int = 5,
     document_id: Optional[str] = None,
+    document_ids: Optional[List[str]] = None,
 ) -> List[Dict[str, Any]]:
     """
     Approximate nearest neighbors by cosine distance (``<=>``) on ``rag_chunks.embedding``.
@@ -691,10 +840,11 @@ def search_rag_chunks(
     _require_vector_deps()
     top_k = max(1, min(100, int(top_k)))
     q = Vector(embedding)
+    doc_ids = _resolve_document_ids(document_id, document_ids)
     with psycopg.connect(_connection_dsn(), row_factory=dict_row) as conn:
         register_vector(conn)
         with conn.cursor() as cur:
-            if document_id:
+            if doc_ids and len(doc_ids) == 1:
                 cur.execute(
                     """
                     SELECT chunk_id, document_id, chunk_index, text_content, meta,
@@ -704,7 +854,19 @@ def search_rag_chunks(
                     ORDER BY embedding <=> %s::vector
                     LIMIT %s
                     """,
-                    (q, document_id, q, top_k),
+                    (q, doc_ids[0], q, top_k),
+                )
+            elif doc_ids:
+                cur.execute(
+                    """
+                    SELECT chunk_id, document_id, chunk_index, text_content, meta,
+                           (embedding <=> %s::vector) AS distance
+                    FROM public.rag_chunks
+                    WHERE document_id = ANY(%s::text[])
+                    ORDER BY embedding <=> %s::vector
+                    LIMIT %s
+                    """,
+                    (q, doc_ids, q, top_k),
                 )
             else:
                 cur.execute(
@@ -743,27 +905,28 @@ def delete_rag_chunks_for_document(document_id: str) -> int:
 
 def get_rag_chunks_for_sheet(sheet_id: str, limit: int = 500) -> List[Dict[str, Any]]:
     """
-    Best-effort chunk lookup for a sheet by matching rag_chunks.meta->>'source_path' to sheets.path.
+    Chunks for a sheet: ``document_id = sheet_{id}``, ``meta.sheet_id``, or legacy ``meta.source_path``.
     """
     limit = max(1, min(2000, int(limit)))
+    doc_id = f"sheet_{sheet_id}"
     with psycopg.connect(_connection_dsn(), row_factory=dict_row) as conn:
         with conn.cursor() as cur:
             cur.execute("SELECT path FROM public.sheets WHERE id = %s", (sheet_id,))
             s = cur.fetchone()
             if not s:
                 return []
-            path = s.get("path")
-            if not path:
-                return []
+            path = str(s.get("path") or "")
             cur.execute(
                 """
                 SELECT chunk_id, document_id, chunk_index, text_content, meta, created_at
                 FROM public.rag_chunks
-                WHERE COALESCE(meta->>'source_path', '') = %s
+                WHERE document_id = %s
+                   OR COALESCE(meta->>'sheet_id', '') = %s
+                   OR (%s <> '' AND COALESCE(meta->>'source_path', '') = %s)
                 ORDER BY chunk_index ASC
                 LIMIT %s
                 """,
-                (str(path), limit),
+                (doc_id, sheet_id, path, path, limit),
             )
             rows = cur.fetchall()
     out: List[Dict[str, Any]] = []

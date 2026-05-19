@@ -16,6 +16,7 @@ export default defineConfig(({ mode }) => ({
       "/api": "http://127.0.0.1:8000",
       "/upload/key": "http://127.0.0.1:8000",
       "/upload/sheet": "http://127.0.0.1:8000",
+      "/upload/exam-bundle": "http://127.0.0.1:8000",
       "/evaluate": {
         target: "http://127.0.0.1:8000",
         changeOrigin: true,

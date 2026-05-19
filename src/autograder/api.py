@@ -33,9 +33,15 @@ from autograder.db import (
     list_sheets,
     metrics_overview,
     next_answer_key_sort_order_start,
-    search_rag_chunks,
 )
-from autograder.embeddings import embed_text_local, retrieve_top_k
+from autograder.embeddings import embed_text_local
+from autograder.rag.ingest import ingest_keys_rag, ingest_sheet_rag, sync_exam_ingest
+from autograder.rag.retrieval import (
+    hybrid_search_for_exam,
+    hybrid_search_for_sheet,
+    match_answer_key,
+    retrieve_context_for_grading,
+)
 from autograder.key_pdf import pdf_bytes_to_upload_request
 from autograder.ocr import (
     google_vision_configured,
@@ -51,12 +57,83 @@ from autograder.schemas import (
     EvaluateResponse,
     QuestionResult,
     RubricBreakdownResponse,
+    UploadExamBundleResponse,
     UploadKeyRequest,
     UploadKeyResponse,
     UploadSheetResponse,
 )
 
 logger = logging.getLogger(__name__)
+
+
+async def _parse_key_upload(
+    file: UploadFile,
+    exam_id: str | None,
+    default_max_marks: float,
+) -> UploadKeyRequest:
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="Missing filename")
+    name = file.filename.lower()
+    raw = await file.read()
+
+    if name.endswith(".json"):
+        try:
+            data = json.loads(raw.decode("utf-8"))
+        except json.JSONDecodeError as e:
+            raise HTTPException(status_code=400, detail=f"Invalid JSON: {e}") from e
+        if exam_id and isinstance(data, dict) and not data.get("exam_id"):
+            data["exam_id"] = exam_id.strip()
+        try:
+            return UploadKeyRequest.model_validate(data)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Schema error: {e}") from e
+
+    if name.endswith(".pdf"):
+        if not exam_id or not str(exam_id).strip():
+            raise HTTPException(
+                status_code=400,
+                detail="PDF answer keys require form field exam_id (same exam as the answer sheet).",
+            )
+        try:
+            return pdf_bytes_to_upload_request(raw, exam_id.strip(), float(default_max_marks))
+        except RuntimeError as e:
+            raise HTTPException(status_code=501, detail=str(e)) from e
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+
+    raise HTTPException(status_code=400, detail="Upload a .json or text-based .pdf answer key file")
+
+
+def _save_sheet_bytes(filename: str, data: bytes, exam_id: str) -> UploadSheetResponse:
+    exid = exam_id.strip()
+    if not exid:
+        raise HTTPException(
+            status_code=400,
+            detail="exam_id is required so the sheet is linked to the same exam as the answer keys.",
+        )
+
+    suffix = Path(filename).suffix or ".png"
+    Path("data/uploads").mkdir(parents=True, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(prefix="sheet_", suffix=suffix, dir="data/uploads")
+    try:
+        Path(tmp_path).write_bytes(data)
+    finally:
+        os.close(fd)
+
+    sheet_id = insert_sheet(filename, tmp_path, exam_id=exid)
+    sheet_ingest: dict = {}
+    try:
+        sheet_ingest = ingest_sheet_rag(sheet_id, force=True)
+    except Exception as e:
+        logger.warning("RAG ingest after sheet upload failed sheet=%s: %s", sheet_id, e)
+        sheet_ingest = {"status": "error", "detail": str(e)}
+    return UploadSheetResponse(sheet_id=sheet_id, filename=filename, exam_id=exid)
+
+
+def _save_sheet_upload(file: UploadFile, exam_id: str) -> UploadSheetResponse:
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="Missing filename")
+    return _save_sheet_bytes(file.filename, file.file.read(), exam_id)
 
 
 def _preprocess_options_from_env() -> dict:
@@ -291,6 +368,10 @@ def upload_key(payload: UploadKeyRequest):
             sort_order=sort_base + i,
         )
         key_ids.append(key_id)
+    try:
+        ingest_keys_rag(payload.exam_id, force=True)
+    except Exception as e:
+        logger.warning("RAG ingest after key upload failed exam=%s: %s", payload.exam_id, e)
     return UploadKeyResponse(key_ids=key_ids)
 
 
@@ -305,39 +386,55 @@ async def upload_key_file(
 
     For PDF, include form field `exam_id` (and optionally `default_max_marks` per question).
     """
-    if not file.filename:
-        raise HTTPException(status_code=400, detail="Missing filename")
-    name = file.filename.lower()
-    raw = await file.read()
+    payload = await _parse_key_upload(file, exam_id, default_max_marks)
+    return upload_key(payload)
 
-    if name.endswith(".json"):
-        try:
-            data = json.loads(raw.decode("utf-8"))
-        except json.JSONDecodeError as e:
-            raise HTTPException(status_code=400, detail=f"Invalid JSON: {e}") from e
-        if exam_id and isinstance(data, dict) and not data.get("exam_id"):
-            data["exam_id"] = exam_id.strip()
-        try:
-            payload = UploadKeyRequest.model_validate(data)
-        except Exception as e:
-            raise HTTPException(status_code=400, detail=f"Schema error: {e}") from e
-        return upload_key(payload)
 
-    if name.endswith(".pdf"):
-        if not exam_id or not str(exam_id).strip():
-            raise HTTPException(
-                status_code=400,
-                detail="PDF answer keys require form field exam_id (e.g. same exam as your sheet evaluation).",
-            )
-        try:
-            payload = pdf_bytes_to_upload_request(raw, exam_id.strip(), float(default_max_marks))
-        except RuntimeError as e:
-            raise HTTPException(status_code=501, detail=str(e)) from e
-        except ValueError as e:
-            raise HTTPException(status_code=400, detail=str(e)) from e
-        return upload_key(payload)
+@app.post("/upload/exam-bundle", response_model=UploadExamBundleResponse)
+async def upload_exam_bundle(
+    exam_id: str = Form(...),
+    key_file: UploadFile = File(...),
+    sheet_file: UploadFile = File(...),
+    default_max_marks: float = Form(default=4.0, ge=0.1, le=1000.0),
+):
+    """
+    Upload answer key + sheet together under one ``exam_id``.
 
-    raise HTTPException(status_code=400, detail="Upload a .json or text-based .pdf answer key file")
+    Indexes keys into ``keys_{exam_id}`` and the sheet into ``sheet_{sheet_id}`` for joint RAG retrieval.
+    """
+    ex = exam_id.strip()
+    if not ex:
+        raise HTTPException(status_code=400, detail="exam_id is required")
+
+    payload = await _parse_key_upload(key_file, ex, default_max_marks)
+    if payload.exam_id.strip() != ex:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Key file exam_id ({payload.exam_id}) does not match form exam_id ({ex})",
+        )
+
+    key_resp = upload_key(payload)
+    sheet_bytes = await sheet_file.read()
+    if not sheet_file.filename:
+        raise HTTPException(status_code=400, detail="Missing sheet filename")
+    sheet_resp = _save_sheet_bytes(sheet_file.filename, sheet_bytes, ex)
+    keys_ingest = ingest_keys_rag(ex, force=True)
+    sheet_ingest = ingest_sheet_rag(sheet_resp.sheet_id, force=True)
+
+    return UploadExamBundleResponse(
+        exam_id=ex,
+        key_ids=key_resp.key_ids,
+        sheet_id=sheet_resp.sheet_id,
+        filename=sheet_resp.filename,
+        keys_ingest=keys_ingest,
+        sheet_ingest=sheet_ingest,
+    )
+
+
+@app.post("/api/exam/{exam_id}/ingest-rag")
+def api_exam_ingest_rag(exam_id: str, sheet_id: str | None = None):
+    """Re-index ``keys_{exam_id}`` and optionally re-ingest a sheet linked to this exam."""
+    return sync_exam_ingest(exam_id.strip(), sheet_id=sheet_id)
 
 
 @app.get("/api/exams")
@@ -374,23 +471,15 @@ def upload_sheet(
     exam_id: str | None = Form(default=None),
 ):
     """
-    Separate upload path for scanned answer sheets (image).
+    Upload a scanned answer sheet. Pass ``exam_id`` so it pairs with keys for RAG + evaluate.
     """
-    if not file.filename:
-        raise HTTPException(status_code=400, detail="Missing filename")
-
-    suffix = Path(file.filename).suffix or ".png"
-    Path("data/uploads").mkdir(parents=True, exist_ok=True)
-    fd, tmp_path = tempfile.mkstemp(prefix="sheet_", suffix=suffix, dir="data/uploads")
-    try:
-        data = file.file.read()
-        Path(tmp_path).write_bytes(data)
-    finally:
-        os.close(fd)
-
     exid = exam_id.strip() if exam_id and exam_id.strip() else None
-    sheet_id = insert_sheet(file.filename, tmp_path, exam_id=exid)
-    return UploadSheetResponse(sheet_id=sheet_id, filename=file.filename)
+    if not exid:
+        raise HTTPException(
+            status_code=400,
+            detail="exam_id is required on sheet upload (use the same id as your answer keys).",
+        )
+    return _save_sheet_upload(file, exid)
 
 
 @app.get("/api/sheets")
@@ -435,6 +524,19 @@ def download_sheet_file(sheet_id: str):
         filename=row.get("filename") or path.name,
         media_type="application/octet-stream",
     )
+
+
+@app.post("/api/sheet/{sheet_id}/ingest")
+def api_sheet_ingest(sheet_id: str, force: bool = False):
+    """Re-run OCR → chunk → embed for an uploaded sheet (populates ``rag_chunks``)."""
+    row = get_sheet(sheet_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="sheet_id not found")
+    try:
+        return ingest_sheet_rag(sheet_id, force=force)
+    except Exception as e:
+        logger.exception("sheet ingest failed sheet=%s", sheet_id)
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @app.get("/api/sheet/{sheet_id}/chunks")
@@ -486,26 +588,33 @@ def api_rag_search(payload: Dict):
         s = get_sheet(sheet_id)
         if not s:
             raise HTTPException(status_code=404, detail="sheet_id not found")
-        chunks = get_rag_chunks_for_sheet(sheet_id, limit=1)
-        if chunks:
-            document_id = chunks[0].get("document_id")
-    qv = embed_text_local(query)
-    hits = search_rag_chunks(qv, top_k=top_k, document_id=document_id)
+        ex = exam_id or str(s.get("exam_id") or "").strip() or None
+        if ex:
+            hits = hybrid_search_for_exam(sheet_id, ex, query, top_k=top_k)
+        else:
+            hits = hybrid_search_for_sheet(sheet_id, query, top_k=top_k)
+    else:
+        from autograder.db import hybrid_search_rag_chunks
+
+        qv = embed_text_local(query)
+        hits = hybrid_search_rag_chunks(query, qv, top_k=top_k, document_id=None)
     out = []
     for h in hits:
         m = h.get("meta") or {}
         hit_exam_id = (m or {}).get("exam_id")
         if exam_id and hit_exam_id and str(hit_exam_id) != exam_id:
             continue
+        fused = h.get("fused_score")
+        score = float(fused) if fused is not None else float(1.0 - float(h.get("distance") or 0.0))
         out.append(
             {
                 "chunk_id": h.get("chunk_id"),
                 "document_id": h.get("document_id"),
                 "text": h.get("text_content") or "",
-                "score": float(1.0 - float(h.get("distance") or 0.0)),
+                "score": score,
                 "page": int((m or {}).get("source_page") or 1),
                 "region": (m or {}).get("region_id") or "",
-                "sheet_id": sheet_id,
+                "sheet_id": sheet_id or m.get("sheet_id"),
                 "exam_id": hit_exam_id or exam_id,
             }
         )
@@ -517,6 +626,21 @@ def evaluate(req: EvaluateRequest):
     sheet = get_sheet(req.sheet_id)
     if not sheet:
         raise HTTPException(status_code=404, detail="sheet_id not found")
+
+    sheet_exam = str(sheet.get("exam_id") or "").strip()
+    if sheet_exam and sheet_exam != req.exam_id:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Sheet is linked to exam '{sheet_exam}' but evaluate requested '{req.exam_id}'. "
+                "Re-upload the sheet with the correct exam_id or pick a matching exam."
+            ),
+        )
+    if not sheet_exam:
+        raise HTTPException(
+            status_code=400,
+            detail="Sheet has no exam_id; upload it with the same exam_id as your answer keys.",
+        )
 
     keys = list_answer_keys(req.exam_id)
     if not keys:
@@ -551,11 +675,14 @@ def evaluate(req: EvaluateRequest):
             )
             ocr_engines.append(ocr_res.engine)
 
-            if idx < len(keys):
-                chosen = keys[idx]
-            else:
-                top = retrieve_top_k(ocr_res.text, keys, top_k=req.top_k)
-                chosen = top[0][0] if top else keys[-1]
+            chosen = match_answer_key(idx, ocr_res.text, keys, top_k=req.top_k)
+            rag_ctx = retrieve_context_for_grading(
+                req.sheet_id,
+                req.exam_id,
+                ocr_res.text,
+                chosen,
+                top_k=req.top_k,
+            )
 
             eval_res, llm_model = score_answer_llm(
                 student_answer=ocr_res.text,
@@ -565,9 +692,12 @@ def evaluate(req: EvaluateRequest):
                 subject_domain=chosen.get("domain") or "general",
                 ocr_confidence=float(ocr_res.confidence),
                 rubric_override=chosen.get("rubric_override"),
+                rag_context=rag_ctx.get("context_text"),
             )
 
             flags = list(set((ocr_res.flags or []) + eval_res.flags))
+            if rag_ctx.get("chunk_ids"):
+                flags.append("rag_context_used")
             all_flags.extend(flags)
 
             q_results.append(
