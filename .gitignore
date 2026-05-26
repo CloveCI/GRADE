@@ -11,11 +11,9 @@ micillaneousSSS/
 # Secrets and local env (never commit real keys)
 .env
 .env.*
-!.env.example
 .env.local
 frontend/.env
 frontend/.env.*
-!frontend/.env.example
 frontend/.env.local
 
 # Cloud / API key material (paths often used on disk; keep out of git)
@@ -71,9 +69,16 @@ Desktop.ini
 .cursor/
 
 # Frontend (Vite)
+frontend-legacy/
 frontend/node_modules/
 frontend/dist/
 
 frontend/*.tsbuildinfo
 frontend/vite.config.js
 frontend/vite.config.d.ts
+
+# Legacy/full app UI copy
+grade-companion-main/
+
+# Project docs
+DESIGN.md

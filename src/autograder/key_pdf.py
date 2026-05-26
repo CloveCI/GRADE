@@ -6,11 +6,16 @@ Extracts text with pypdf, then splits on numbered sections (1. 2. Q1:, etc.).
 
 from __future__ import annotations
 
+import logging
 import re
+import tempfile
 from io import BytesIO
+from pathlib import Path
 from typing import List, Tuple
 
 from autograder.schemas import AnswerKeyItemIn, UploadKeyRequest
+
+logger = logging.getLogger(__name__)
 
 
 def extract_text_from_pdf_bytes(data: bytes) -> str:
@@ -29,6 +34,43 @@ def extract_text_from_pdf_bytes(data: bytes) -> str:
     for page in reader.pages:
         chunks.append(page.extract_text() or "")
     return "\n\n".join(chunks).strip()
+
+
+def ocr_pdf_bytes_to_text(data: bytes, *, max_pages: int = 20) -> str:
+    """
+    OCR a scanned/image-only PDF (no text layer) using the same tiered OCR stack as sheets.
+    """
+    try:
+        import fitz  # PyMuPDF
+    except ImportError as e:
+        raise RuntimeError(
+            "Scanned answer-key PDFs require PyMuPDF. Install: pip install pymupdf"
+        ) from e
+
+    from autograder.ocr import ocr_patch
+    from autograder.preprocessing import load_bgr_from_path
+
+    with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+        tmp.write(data)
+        path = Path(tmp.name)
+
+    parts: List[str] = []
+    try:
+        doc = fitz.open(str(path))
+        try:
+            page_count = min(max(1, doc.page_count), max_pages)
+        finally:
+            doc.close()
+        for page_idx in range(page_count):
+            bgr = load_bgr_from_path(path, pdf_page_index=page_idx)
+            result = ocr_patch(bgr)
+            text = (result.text or "").strip()
+            if text:
+                parts.append(text)
+    finally:
+        path.unlink(missing_ok=True)
+
+    return "\n\n".join(parts).strip()
 
 
 def _parse_max_marks(body: str, default: float) -> Tuple[str, float]:
@@ -63,7 +105,10 @@ def text_to_upload_request(text: str, exam_id: str, default_max_marks: float = 4
     """
     text = text.replace("\r\n", "\n").replace("\r", "\n").strip()
     if not text:
-        raise ValueError("Answer key PDF contained no extractable text (try a text-based PDF, not a scan).")
+        raise ValueError(
+            "Answer key PDF contained no extractable text after PDF extract and OCR "
+            "(use a text-based key PDF/JSON, or configure Google Vision OCR in .env for scans)."
+        )
 
     matches = list(_SECTION_START.finditer(text))
     if not matches:
@@ -106,4 +151,13 @@ def pdf_bytes_to_upload_request(
     default_max_marks: float = 4.0,
 ) -> UploadKeyRequest:
     raw = extract_text_from_pdf_bytes(data)
+    if not raw.strip():
+        logger.info("Key PDF has no text layer; attempting OCR fallback exam_id=%s", exam_id)
+        try:
+            raw = ocr_pdf_bytes_to_text(data)
+        except RuntimeError:
+            raise
+        except Exception as e:
+            logger.warning("Key PDF OCR fallback failed: %s", e)
+            raw = ""
     return text_to_upload_request(raw, exam_id, default_max_marks)

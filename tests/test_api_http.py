@@ -24,6 +24,22 @@ def test_integrations(client):
     data = r.json()
     assert data["phase_1_preprocess"]["ok"] is True
     assert data["phase_4_api"]["ok"] is True
+    assert data["phase_3_db"]["connected"] is True
+    assert data["rag_storage"]["ready"] is True
+    assert data["evaluation_storage"]["ready"] is True
+
+
+def test_database_status(client):
+    r = client.get("/api/database/status")
+    assert r.status_code == 200
+    data = r.json()
+    assert data["configured"] is True
+    assert data["connected"] is True
+    assert data["schema_ready"] is True
+    assert data["rag_ready"] is True
+    assert data["evaluation_ready"] is True
+    assert data["tables"]["rag_chunks"] is True
+    assert data["tables"]["evaluation_results"] is True
 
 
 def test_upload_key_json(client):

@@ -129,6 +129,77 @@ def _connection_dsn() -> str:
         return raw
 
 
+def _pg_connect(
+    *,
+    row_factory=None,
+    autocommit: bool = False,
+    connect_timeout: int | None = None,
+):
+    """
+    Open a psycopg connection.
+
+    ``prepare_threshold=0`` disables server-side prepared statements, which break on
+    Supabase pooler / PgBouncer (transaction mode, port 6543) with
+    ``DuplicatePreparedStatement: prepared statement "_pg3_0" already exists``.
+    """
+    kw: Dict[str, Any] = {"prepare_threshold": 0}
+    if row_factory is not None:
+        kw["row_factory"] = row_factory
+    if autocommit:
+        kw["autocommit"] = True
+    if connect_timeout is not None:
+        kw["connect_timeout"] = connect_timeout
+    conn = psycopg.connect(_connection_dsn(), **kw)
+    # Belt-and-suspenders for PgBouncer / Supabase pooler (port 6543).
+    conn.prepare_threshold = 0
+    return conn
+
+
+def _pg_execute(cur, query: str, params: Any = None) -> None:
+    """Run SQL without server-side prepared statements (required for transaction pooler)."""
+    cur.execute(query, params, prepare=False)
+
+
+def _register_pgvector(conn) -> None:
+    """
+    Register pgvector psycopg adapters.
+
+    ``pgvector.psycopg.register_vector`` uses ``TypeInfo.fetch``, which prepares statements
+    and breaks on Supabase / PgBouncer transaction poolers (port 6543).
+    """
+    if register_vector is None:
+        return
+    from psycopg.types import TypeInfo
+    from pgvector.psycopg.bit import register_bit_info
+    from pgvector.psycopg.halfvec import register_halfvec_info
+    from pgvector.psycopg.sparsevec import register_sparsevec_info
+    from pgvector.psycopg.vector import register_vector_info
+
+    def _type_info(name: str) -> Optional[TypeInfo]:
+        with conn.cursor() as cur:
+            _pg_execute(
+                cur,
+                "SELECT oid, typarray FROM pg_type WHERE typname = %s",
+                (name,),
+            )
+            row = cur.fetchone()
+        if not row:
+            return None
+        oid = row["oid"] if isinstance(row, dict) else row[0]
+        array_oid = row["typarray"] if isinstance(row, dict) else row[1]
+        return TypeInfo(name=name, oid=int(oid), array_oid=int(array_oid))
+
+    for typname, reg_fn in (
+        ("vector", register_vector_info),
+        ("bit", register_bit_info),
+        ("halfvec", register_halfvec_info),
+        ("sparsevec", register_sparsevec_info),
+    ):
+        info = _type_info(typname)
+        if info is not None:
+            reg_fn(conn, info)
+
+
 def _require_vector_deps() -> None:
     if Vector is None or register_vector is None:
         raise RuntimeError(
@@ -139,9 +210,110 @@ def _require_vector_deps() -> None:
 def get_conn():
     """Return an open psycopg connection (caller must close)."""
     _require_vector_deps()
-    conn = psycopg.connect(_connection_dsn(), row_factory=dict_row)
-    register_vector(conn)
+    conn = _pg_connect(row_factory=dict_row)
+    _register_pgvector(conn)
     return conn
+
+
+def _connection_target_redacted() -> Optional[str]:
+    """Host/port/dbname for status UI (no password)."""
+    try:
+        parts = conninfo_to_dict(_dsn())
+    except Exception:
+        return None
+    host = parts.get("host") or "?"
+    port = parts.get("port") or "5432"
+    db = parts.get("dbname") or parts.get("database") or "?"
+    return f"{host}:{port}/{db}"
+
+
+def database_status() -> Dict[str, Any]:
+    """
+    Live connectivity probe for PostgreSQL + pgvector (RAG + evaluation persistence).
+
+    Used by ``/health``, ``/api/integrations``, and ``/api/database/status``.
+    """
+    required_tables = ("answer_keys", "sheets", "rag_chunks", "evaluation_results")
+    out: Dict[str, Any] = {
+        "configured": False,
+        "connected": False,
+        "postgres_deps_installed": Vector is not None and register_vector is not None,
+        "pgvector_extension": False,
+        "schema_ready": False,
+        "rag_ready": False,
+        "evaluation_ready": False,
+        "tables": {t: False for t in required_tables},
+        "target": None,
+        "error": None,
+        "counts": {
+            "answer_keys": 0,
+            "sheets": 0,
+            "rag_chunks": 0,
+            "evaluation_results": 0,
+        },
+    }
+    try:
+        _dsn()
+        out["configured"] = True
+        out["target"] = _connection_target_redacted()
+    except RuntimeError as e:
+        out["error"] = str(e)
+        return out
+
+    if not out["postgres_deps_installed"]:
+        out["error"] = "Install psycopg + pgvector: pip install -e \".[api]\""
+        return out
+
+    try:
+        with _pg_connect(row_factory=dict_row, connect_timeout=8) as conn:
+            with conn.cursor() as cur:
+                _pg_execute(cur,
+                    "SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'vector') AS ok"
+                )
+                out["pgvector_extension"] = bool((cur.fetchone() or {}).get("ok"))
+
+                for table in required_tables:
+                    _pg_execute(cur,
+                        """
+                        SELECT EXISTS (
+                            SELECT 1 FROM information_schema.tables
+                            WHERE table_schema = 'public' AND table_name = %s
+                        ) AS ok
+                        """,
+                        (table,),
+                    )
+                    out["tables"][table] = bool((cur.fetchone() or {}).get("ok"))
+
+                out["schema_ready"] = all(out["tables"].values())
+                out["rag_ready"] = (
+                    out["schema_ready"]
+                    and out["pgvector_extension"]
+                    and out["tables"]["rag_chunks"]
+                )
+                out["evaluation_ready"] = out["schema_ready"] and out["tables"]["evaluation_results"]
+
+                if out["tables"]["answer_keys"]:
+                    _pg_execute(cur,"SELECT COUNT(*)::bigint AS c FROM public.answer_keys")
+                    out["counts"]["answer_keys"] = int((cur.fetchone() or {}).get("c") or 0)
+                if out["tables"]["sheets"]:
+                    _pg_execute(cur,"SELECT COUNT(*)::bigint AS c FROM public.sheets")
+                    out["counts"]["sheets"] = int((cur.fetchone() or {}).get("c") or 0)
+                if out["tables"]["rag_chunks"]:
+                    _pg_execute(cur,"SELECT COUNT(*)::bigint AS c FROM public.rag_chunks")
+                    out["counts"]["rag_chunks"] = int((cur.fetchone() or {}).get("c") or 0)
+                if out["tables"]["evaluation_results"]:
+                    _pg_execute(cur,
+                        "SELECT COUNT(*)::bigint AS c FROM public.evaluation_results"
+                    )
+                    out["counts"]["evaluation_results"] = int((cur.fetchone() or {}).get("c") or 0)
+
+        out["connected"] = True
+        if out["connected"] and not out["schema_ready"]:
+            missing = [t for t in required_tables if not out["tables"][t]]
+            out["error"] = f"Schema incomplete; missing tables: {', '.join(missing)}. Run init_db or migrations."
+    except Exception as e:
+        out["error"] = f"{type(e).__name__}: {e}"
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -163,11 +335,11 @@ def _natural_question_id_key(question_id: str) -> List[Any]:
 def _backfill_answer_keys_sort_order_natural(conn) -> None:
     """Reassign sort_order per exam_id by natural order of question_id (legacy data fix)."""
     with conn.cursor() as cur:
-        cur.execute("SELECT DISTINCT exam_id FROM public.answer_keys")
+        _pg_execute(cur,"SELECT DISTINCT exam_id FROM public.answer_keys")
         exams = cur.fetchall()
         for row in exams:
             exam_id = row["exam_id"] if isinstance(row, dict) else row[0]
-            cur.execute(
+            _pg_execute(cur,
                 "SELECT id, question_id FROM public.answer_keys WHERE exam_id = %s",
                 (exam_id,),
             )
@@ -180,7 +352,7 @@ def _backfill_answer_keys_sort_order_natural(conn) -> None:
             )
             for i, row in enumerate(ordered):
                 row_id = row["id"] if isinstance(row, dict) else row[0]
-                cur.execute(
+                _pg_execute(cur,
                     "UPDATE public.answer_keys SET sort_order = %s WHERE id = %s",
                     (i, row_id),
                 )
@@ -291,11 +463,11 @@ CREATE INDEX IF NOT EXISTS idx_rag_chunks_text_fts
 
 def init_db() -> None:
     _require_vector_deps()
-    with psycopg.connect(_connection_dsn(), autocommit=True) as conn:
+    with _pg_connect( autocommit=True) as conn:
         with conn.cursor() as cur:
             for stmt in _SCHEMA_STATEMENTS:
                 try:
-                    cur.execute(stmt)
+                    _pg_execute(cur,stmt)
                 except psycopg.Error as e:
                     msg = str(e).lower()
                     if any(
@@ -314,9 +486,9 @@ def init_db() -> None:
 
 def insert_sheet(filename: str, path: str, exam_id: Optional[str] = None) -> str:
     sheet_id = str(uuid.uuid4())
-    with psycopg.connect(_connection_dsn(), row_factory=dict_row) as conn:
+    with _pg_connect(row_factory=dict_row) as conn:
         with conn.cursor() as cur:
-            cur.execute(
+            _pg_execute(cur,
                 "INSERT INTO public.sheets (id, filename, path, exam_id) VALUES (%s, %s, %s, %s)",
                 (sheet_id, filename, path, exam_id),
             )
@@ -324,9 +496,9 @@ def insert_sheet(filename: str, path: str, exam_id: Optional[str] = None) -> str
 
 
 def get_sheet(sheet_id: str) -> Optional[Dict[str, Any]]:
-    with psycopg.connect(_connection_dsn(), row_factory=dict_row) as conn:
+    with _pg_connect(row_factory=dict_row) as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT * FROM public.sheets WHERE id = %s", (sheet_id,))
+            _pg_execute(cur,"SELECT * FROM public.sheets WHERE id = %s", (sheet_id,))
             row = cur.fetchone()
     if not row:
         return None
@@ -344,10 +516,10 @@ def list_sheets(
 ) -> List[Dict[str, Any]]:
     limit = max(1, min(1000, int(limit)))
     offset = max(0, int(offset))
-    with psycopg.connect(_connection_dsn(), row_factory=dict_row) as conn:
+    with _pg_connect(row_factory=dict_row) as conn:
         with conn.cursor() as cur:
             if exam_id:
-                cur.execute(
+                _pg_execute(cur,
                     """
                     SELECT id, filename, path, exam_id, created_at
                     FROM public.sheets
@@ -358,7 +530,7 @@ def list_sheets(
                     (exam_id, limit, offset),
                 )
             else:
-                cur.execute(
+                _pg_execute(cur,
                     """
                     SELECT id, filename, path, exam_id, created_at
                     FROM public.sheets
@@ -390,10 +562,10 @@ def insert_answer_key(
     _require_vector_deps()
     key_id = str(uuid.uuid4())
     rub = Json(rubric_override) if rubric_override is not None else None
-    with psycopg.connect(_connection_dsn(), row_factory=dict_row) as conn:
-        register_vector(conn)
+    with _pg_connect(row_factory=dict_row) as conn:
+        _register_pgvector(conn)
         with conn.cursor() as cur:
-            cur.execute(
+            _pg_execute(cur,
                 """
                 INSERT INTO public.answer_keys(
                     id, exam_id, question_id, expected_answer, embedding, max_marks,
@@ -417,10 +589,10 @@ def insert_answer_key(
 
 def list_answer_keys(exam_id: str) -> List[Dict[str, Any]]:
     _require_vector_deps()
-    with psycopg.connect(_connection_dsn(), row_factory=dict_row) as conn:
-        register_vector(conn)
+    with _pg_connect(row_factory=dict_row) as conn:
+        _register_pgvector(conn)
         with conn.cursor() as cur:
-            cur.execute(
+            _pg_execute(cur,
                 """
                 SELECT id, exam_id, question_id, expected_answer, embedding, max_marks,
                        domain, rubric_override, sort_order, created_at
@@ -450,9 +622,9 @@ def list_answer_keys(exam_id: str) -> List[Dict[str, Any]]:
 
 
 def next_answer_key_sort_order_start(exam_id: str) -> int:
-    with psycopg.connect(_connection_dsn(), row_factory=dict_row) as conn:
+    with _pg_connect(row_factory=dict_row) as conn:
         with conn.cursor() as cur:
-            cur.execute(
+            _pg_execute(cur,
                 "SELECT COALESCE(MAX(sort_order), -1) AS m FROM public.answer_keys WHERE exam_id = %s",
                 (exam_id,),
             )
@@ -463,9 +635,9 @@ def next_answer_key_sort_order_start(exam_id: str) -> int:
 def insert_evaluation_result(payload: Dict[str, Any]) -> str:
     result_id = str(uuid.uuid4())
     flags = payload.get("flags", [])
-    with psycopg.connect(_connection_dsn(), row_factory=dict_row) as conn:
+    with _pg_connect(row_factory=dict_row) as conn:
         with conn.cursor() as cur:
-            cur.execute(
+            _pg_execute(cur,
                 """
                 INSERT INTO public.evaluation_results(
                     id, sheet_id, exam_id, per_question_scores, total_marks, max_total,
@@ -500,9 +672,9 @@ def _coerce_json_field(val: Any) -> Any:
 
 
 def get_result(result_id: str) -> Optional[Dict[str, Any]]:
-    with psycopg.connect(_connection_dsn(), row_factory=dict_row) as conn:
+    with _pg_connect(row_factory=dict_row) as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT * FROM public.evaluation_results WHERE id = %s", (result_id,))
+            _pg_execute(cur,"SELECT * FROM public.evaluation_results WHERE id = %s", (result_id,))
             row = cur.fetchone()
     if not row:
         return None
@@ -544,9 +716,9 @@ def list_results(
         LIMIT %s OFFSET %s
     """
     args.extend([limit, offset])
-    with psycopg.connect(_connection_dsn(), row_factory=dict_row) as conn:
+    with _pg_connect(row_factory=dict_row) as conn:
         with conn.cursor() as cur:
-            cur.execute(sql, tuple(args))
+            _pg_execute(cur,sql, tuple(args))
             rows = cur.fetchall()
     out: List[Dict[str, Any]] = []
     for row in rows:
@@ -563,9 +735,9 @@ def list_results(
 
 def list_exams_with_counts(limit: int = 500) -> List[Dict[str, Any]]:
     limit = max(1, min(2000, int(limit)))
-    with psycopg.connect(_connection_dsn(), row_factory=dict_row) as conn:
+    with _pg_connect(row_factory=dict_row) as conn:
         with conn.cursor() as cur:
-            cur.execute(
+            _pg_execute(cur,
                 """
                 WITH exams AS (
                     SELECT exam_id FROM public.answer_keys
@@ -613,9 +785,9 @@ def list_exams_with_counts(limit: int = 500) -> List[Dict[str, Any]]:
 
 
 def metrics_overview() -> Dict[str, Any]:
-    with psycopg.connect(_connection_dsn(), row_factory=dict_row) as conn:
+    with _pg_connect(row_factory=dict_row) as conn:
         with conn.cursor() as cur:
-            cur.execute(
+            _pg_execute(cur,
                 """
                 SELECT
                     (SELECT COUNT(*)::int FROM public.sheets) AS sheets,
@@ -662,8 +834,8 @@ def upsert_rag_chunks_batch(rows: List[Dict[str, Any]]) -> int:
         return 0
     _require_vector_deps()
     n = 0
-    with psycopg.connect(_connection_dsn(), row_factory=dict_row) as conn:
-        register_vector(conn)
+    with _pg_connect(row_factory=dict_row) as conn:
+        _register_pgvector(conn)
         with conn.cursor() as cur:
             for r in rows:
                 cid = r["chunk_id"]
@@ -672,7 +844,7 @@ def upsert_rag_chunks_batch(rows: List[Dict[str, Any]]) -> int:
                 txt = r["text_content"]
                 emb = r["embedding"]
                 meta = Json(r.get("meta") or {})
-                cur.execute(
+                _pg_execute(cur,
                     """
                     INSERT INTO public.rag_chunks (
                         chunk_id, document_id, chunk_index, text_content, embedding, meta
@@ -718,10 +890,10 @@ def search_rag_chunks_bm25(
         return []
     top_k = max(1, min(100, int(top_k)))
     doc_ids = _resolve_document_ids(document_id, document_ids)
-    with psycopg.connect(_connection_dsn(), row_factory=dict_row) as conn:
+    with _pg_connect(row_factory=dict_row) as conn:
         with conn.cursor() as cur:
             if doc_ids and len(doc_ids) == 1:
-                cur.execute(
+                _pg_execute(cur,
                     """
                     SELECT chunk_id, document_id, chunk_index, text_content, meta,
                            ts_rank_cd(
@@ -737,7 +909,7 @@ def search_rag_chunks_bm25(
                     (q, doc_ids[0], q, top_k),
                 )
             elif doc_ids:
-                cur.execute(
+                _pg_execute(cur,
                     """
                     SELECT chunk_id, document_id, chunk_index, text_content, meta,
                            ts_rank_cd(
@@ -753,7 +925,7 @@ def search_rag_chunks_bm25(
                     (q, doc_ids, q, top_k),
                 )
             else:
-                cur.execute(
+                _pg_execute(cur,
                     """
                     SELECT chunk_id, document_id, chunk_index, text_content, meta,
                            ts_rank_cd(
@@ -841,11 +1013,11 @@ def search_rag_chunks(
     top_k = max(1, min(100, int(top_k)))
     q = Vector(embedding)
     doc_ids = _resolve_document_ids(document_id, document_ids)
-    with psycopg.connect(_connection_dsn(), row_factory=dict_row) as conn:
-        register_vector(conn)
+    with _pg_connect(row_factory=dict_row) as conn:
+        _register_pgvector(conn)
         with conn.cursor() as cur:
             if doc_ids and len(doc_ids) == 1:
-                cur.execute(
+                _pg_execute(cur,
                     """
                     SELECT chunk_id, document_id, chunk_index, text_content, meta,
                            (embedding <=> %s::vector) AS distance
@@ -857,7 +1029,7 @@ def search_rag_chunks(
                     (q, doc_ids[0], q, top_k),
                 )
             elif doc_ids:
-                cur.execute(
+                _pg_execute(cur,
                     """
                     SELECT chunk_id, document_id, chunk_index, text_content, meta,
                            (embedding <=> %s::vector) AS distance
@@ -869,7 +1041,7 @@ def search_rag_chunks(
                     (q, doc_ids, q, top_k),
                 )
             else:
-                cur.execute(
+                _pg_execute(cur,
                     """
                     SELECT chunk_id, document_id, chunk_index, text_content, meta,
                            (embedding <=> %s::vector) AS distance
@@ -892,9 +1064,9 @@ def search_rag_chunks(
 
 def delete_rag_chunks_for_document(document_id: str) -> int:
     """Remove all chunks for a document. Returns deleted row count."""
-    with psycopg.connect(_connection_dsn(), row_factory=dict_row) as conn:
+    with _pg_connect(row_factory=dict_row) as conn:
         with conn.cursor() as cur:
-            cur.execute(
+            _pg_execute(cur,
                 "DELETE FROM public.rag_chunks WHERE document_id = %s",
                 (document_id,),
             )
@@ -909,14 +1081,14 @@ def get_rag_chunks_for_sheet(sheet_id: str, limit: int = 500) -> List[Dict[str, 
     """
     limit = max(1, min(2000, int(limit)))
     doc_id = f"sheet_{sheet_id}"
-    with psycopg.connect(_connection_dsn(), row_factory=dict_row) as conn:
+    with _pg_connect(row_factory=dict_row) as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT path FROM public.sheets WHERE id = %s", (sheet_id,))
+            _pg_execute(cur,"SELECT path FROM public.sheets WHERE id = %s", (sheet_id,))
             s = cur.fetchone()
             if not s:
                 return []
             path = str(s.get("path") or "")
-            cur.execute(
+            _pg_execute(cur,
                 """
                 SELECT chunk_id, document_id, chunk_index, text_content, meta, created_at
                 FROM public.rag_chunks

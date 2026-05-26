@@ -66,6 +66,25 @@ def _gemini_api_key() -> Optional[str]:
     return os.environ.get("GRADE_GEMINI_API_KEY") or os.environ.get("GEMINI_API_KEY")
 
 
+def _gemini_error_hint(exc: Exception) -> str:
+    """Short, actionable message for UI/logs (not full gRPC metadata)."""
+    msg = str(exc)
+    if "API_KEY_SERVICE_BLOCKED" in msg:
+        return (
+            "Gemini API key is blocked from Generative Language API (API_KEY_SERVICE_BLOCKED). "
+            "Use a key from https://aistudio.google.com/apikey, or in Google Cloud Console → "
+            "Credentials → your key → API restrictions: add “Generative Language API” or set "
+            "“Don’t restrict key”. Restart uvicorn after updating GRADE_GEMINI_API_KEY in .env."
+        )
+    if "SERVICE_DISABLED" in msg:
+        return (
+            "Generative Language API is disabled for GCP project linked to this key. Enable it: "
+            "https://console.cloud.google.com/apis/library/generativelanguage.googleapis.com"
+        )
+    line = msg.replace("\n", " ").strip()
+    return f"Gemini error: {line[:240]}"
+
+
 def _parse_llm_json_text(text: str) -> Dict[str, Any]:
     text = text.strip()
     m = re.search(r"```(?:json)?\s*([\s\S]*?)```", text)
@@ -99,20 +118,22 @@ def _score_with_gemini(
         "flags (array of strings). "
         "Do not include max_marks."
     )
+    grounding = rag_context if rag_context else (
+        f"=== KEY SIDE — Question {question_text} ===\n"
+        f"Official model answer: {model_answer}\n\n"
+        f"=== STUDENT SIDE — Question {question_text} ===\n"
+        f"OCR text: {student_answer}\n"
+        "(No RAG excerpts retrieved.)"
+    )
     user = f"""{payload_hint}
 
 Question ID: {question_text}
 Subject domain: {subject_domain}
 Max marks for this question: {max_marks}
+OCR confidence (0–1): {ocr_confidence:.2f}
 
-Reference / model answer:
-{model_answer}
-
-Student answer (from OCR; reported OCR confidence {ocr_confidence:.2f}):
-{student_answer}
-
-Retrieved excerpts from this student's sheet (for grounding; may overlap OCR):
-{rag_context if rag_context else "(none)"}
+Evidence (use ONLY this block; compare KEY SIDE vs STUDENT SIDE semantically):
+{grounding}
 
 Rubric override (JSON, or null): {json.dumps(rubric_override) if rubric_override else "null"}
 """
@@ -121,7 +142,7 @@ Rubric override (JSON, or null): {json.dumps(rubric_override) if rubric_override
     resp = gm.generate_content(
         full_prompt,
         generation_config=genai.GenerationConfig(
-            temperature=0.15,
+            temperature=0.0,
             response_mime_type="application/json",
         ),
     )
@@ -191,7 +212,7 @@ def score_answer_llm(
             merged_flags = list(dict.fromkeys(list(fb.flags) + ["gemini_error", "review_required"]))
             fb = fb.model_copy(
                 update={
-                    "feedback": f"{fb.feedback} (Gemini error: {exc})",
+                    "feedback": f"{fb.feedback} {_gemini_error_hint(exc)}",
                     "flags": merged_flags,
                 }
             )

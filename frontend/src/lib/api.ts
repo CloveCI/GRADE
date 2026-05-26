@@ -1,444 +1,591 @@
-import type {
-  AnswerKey,
-  EvaluationResult,
-  Exam,
-  ExamSummary,
-  MetricsOverview,
-  RagChunk,
-  RagSearchHit,
-  Sheet,
-} from "./types";
+// GRADE API client — maps FastAPI (snake_case) to companion UI types.
+// VITE_API_URL empty in dev → Vite proxy to http://127.0.0.1:8000
 
-const RAW = import.meta.env.VITE_API_URL as string | undefined;
-const API_BASE = (RAW ?? "").replace(/\/$/, "");
+const BASE = (import.meta.env.VITE_API_URL ?? "").replace(/\/$/, "");
 
-function toNumConfidence(v: string | number | null | undefined): number {
-  if (typeof v === "number") return v;
-  if (!v) return 0.75;
-  const x = String(v).toLowerCase();
-  if (x === "high") return 0.9;
-  if (x === "medium") return 0.7;
-  if (x === "low") return 0.45;
-  const n = Number(x);
-  return Number.isFinite(n) ? n : 0.75;
-}
-
-function toFlag(confidenceFlag: boolean | string | undefined, conf: number): "ok" | "warn" | "low" {
-  if (typeof confidenceFlag === "string") {
-    if (confidenceFlag === "ok" || confidenceFlag === "warn" || confidenceFlag === "low") {
-      return confidenceFlag;
-    }
+export class ApiError extends Error {
+  status: number;
+  body: unknown;
+  constructor(status: number, message: string, body?: unknown) {
+    super(message);
+    this.status = status;
+    this.body = body;
   }
-  if (confidenceFlag) return "low";
-  if (conf < 0.8) return "warn";
-  return "ok";
 }
 
-async function req(path: string, init?: RequestInit) {
-  const res = await fetch(`${API_BASE}${path}`, init);
+async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const res = await fetch(`${BASE}${path}`, {
+    ...init,
+    headers: {
+      Accept: "application/json",
+      ...(init?.body && !(init.body instanceof FormData)
+        ? { "Content-Type": "application/json" }
+        : {}),
+      ...(init?.headers ?? {}),
+    },
+  });
+  const text = await res.text();
+  const data = text ? safeJson(text) : null;
   if (!res.ok) {
-    let detail = res.statusText;
-    try {
-      const j = await res.json();
-      detail = (j.detail as string) || JSON.stringify(j);
-    } catch {
-      // ignore
+    let msg = res.statusText || `Request failed (${res.status})`;
+    if (data && typeof data === "object" && "detail" in data) {
+      msg = formatApiDetail((data as { detail: unknown }).detail);
     }
-    throw new Error(`${res.status}: ${detail}`);
+    throw new ApiError(res.status, msg, data);
   }
-  return res;
+  return data as T;
 }
+
+function formatApiDetail(detail: unknown): string {
+  if (typeof detail === "string") return detail;
+  if (Array.isArray(detail)) {
+    return detail
+      .map((item) => {
+        if (item && typeof item === "object" && "msg" in item) {
+          const loc = "loc" in item && Array.isArray(item.loc) ? item.loc.join(".") : "";
+          return loc ? `${loc}: ${String(item.msg)}` : String(item.msg);
+        }
+        return JSON.stringify(item);
+      })
+      .join("; ");
+  }
+  return JSON.stringify(detail);
+}
+
+function safeJson(t: string): unknown {
+  try {
+    return JSON.parse(t);
+  } catch {
+    return t;
+  }
+}
+
+// ---------- Types (companion UI) ----------
+
+export interface DatabaseStatus {
+  configured: boolean;
+  connected: boolean;
+  postgres_deps_installed?: boolean;
+  pgvector_extension: boolean;
+  schema_ready: boolean;
+  rag_ready: boolean;
+  evaluation_ready: boolean;
+  target?: string | null;
+  error?: string | null;
+  counts?: {
+    answer_keys?: number;
+    sheets?: number;
+    rag_chunks?: number;
+    evaluation_results?: number;
+  };
+}
+
+export interface IntegrationsStatus {
+  llm_gemini?: { ready?: boolean; GRADE_ENABLE_LLM?: boolean; api_key_present?: boolean };
+  rag_storage?: { ready?: boolean; chunk_count?: number };
+  evaluation_storage?: { ready?: boolean; result_count?: number };
+  phase_3_db?: DatabaseStatus & { ok?: boolean };
+  [k: string]: unknown;
+}
+
+export interface ExamSummary {
+  exam_id: string;
+  title?: string;
+  key_count: number;
+  sheet_count: number;
+  updated_at?: string | null;
+}
+
+export interface AnswerKeyQuestion {
+  question_id: string;
+  question_text?: string;
+  expected_answer?: string;
+  max_marks?: number;
+  rubric?: string;
+}
+
+export interface AnswerKey {
+  exam_id: string;
+  title?: string;
+  questions: AnswerKeyQuestion[];
+}
+
+export interface Sheet {
+  sheet_id: string;
+  exam_id: string;
+  filename?: string;
+  pages?: number;
+  ingested?: boolean;
+  status?: string;
+}
+
+export interface RagChunk {
+  chunk_id: string;
+  text: string;
+  page?: number;
+  region?: string;
+  score?: number;
+}
+
+export interface RubricBreakdown {
+  criterion: string;
+  awarded: number;
+  max: number;
+  note?: string;
+}
+
+export interface QuestionResult {
+  question_id: string;
+  region_index?: number;
+  ocr_raw?: string;
+  question_text?: string;
+  expected_answer?: string;
+  student_answer?: string;
+  ocr_text?: string;
+  awarded_marks: number;
+  max_marks: number;
+  confidence?: number;
+  rationale?: string;
+  rubric?: RubricBreakdown[];
+  flags?: { rag_context_used?: boolean; [k: string]: unknown };
+}
+
+export interface EvaluationResult {
+  result_id: string;
+  sheet_id: string;
+  exam_id: string;
+  total_awarded: number;
+  total_max: number;
+  questions: QuestionResult[];
+  created_at?: string;
+  used_llm?: boolean;
+  client_only?: boolean;
+  notes?: string;
+}
+
+export interface RagSearchHit {
+  corpus: string;
+  chunk: RagChunk;
+}
+
+export interface MetricsOverview {
+  total_exams: number;
+  total_keys: number;
+  total_sheets: number;
+  total_results: number;
+  rag_chunks: number;
+  avg_score?: number;
+}
+
+export type StreamPhase =
+  | "started"
+  | "preprocess"
+  | "ocr_region"
+  | "retrieve"
+  | "score"
+  | "complete";
+
+export interface StreamEvent {
+  phase: StreamPhase;
+  message?: string;
+  progress?: number;
+  detail?: unknown;
+}
+
+// ---------- Mappers ----------
 
 function guessMime(filename: string): string | undefined {
   const n = filename.toLowerCase();
   if (n.endsWith(".pdf")) return "application/pdf";
   if (n.endsWith(".png")) return "image/png";
   if (n.endsWith(".jpg") || n.endsWith(".jpeg")) return "image/jpeg";
-  if (n.endsWith(".webp")) return "image/webp";
-  if (n.endsWith(".gif")) return "image/gif";
   return undefined;
 }
 
-function mapSheet(r: Record<string, any>): Sheet {
-  const id = String(r.id);
-  const filename = String(r.filename || id);
+function mapExamSummary(row: Record<string, unknown>): ExamSummary {
   return {
-    id,
-    filename,
-    examId: (r.exam_id ?? r.examId ?? null) as string | null,
-    ocrEngine: ((r.ocr_engine || "tesseract") as "tesseract" | "easyocr" | "paddle"),
-    status: ((r.status || "uploaded") as "uploaded" | "ingested" | "evaluated"),
-    createdAt: String(r.created_at || r.createdAt || new Date().toISOString()),
-    pageCount: Number(r.page_count || r.pageCount || 1),
-    documentId: String(r.document_id || r.documentId || `sheet_${id}`),
-    fileUrl: `${API_BASE}/sheet/${encodeURIComponent(id)}/file`,
-    mimeType: guessMime(filename),
+    exam_id: String(row.id ?? row.exam_id ?? ""),
+    title: String(row.title ?? row.id ?? ""),
+    key_count: Number(row.key_count ?? 0),
+    sheet_count: Number(row.sheet_count ?? 0),
+    updated_at: row.last_eval_at ? String(row.last_eval_at) : null,
   };
 }
 
-function mapResult(r: Record<string, any>): EvaluationResult {
-  const q = Array.isArray(r.questions) ? r.questions : [];
-  const conf = toNumConfidence(r.grading_confidence ?? r.gradingConfidence);
+function mapSheet(row: Record<string, unknown>): Sheet {
+  const id = String(row.id ?? row.sheet_id ?? "");
+  const status = String(row.status ?? "uploaded");
   return {
-    id: String(r.id || r.result_id),
-    sheetId: String(r.sheet_id || r.sheetId || ""),
-    examId: String(r.exam_id || r.examId || ""),
-    totalMarks: Number(r.total_marks ?? r.totalMarks ?? 0),
-    maxTotal: Number(r.max_total ?? r.maxTotal ?? 0),
-    gradingConfidence: conf,
-    confidenceFlag: toFlag(r.confidence_flag ?? r.confidenceFlag, conf),
-    promptHash: String(r.prompt_hash || r.promptHash || ""),
-    model: String(r.llm_model || r.model || ""),
-    createdAt: String(r.created_at || r.createdAt || new Date().toISOString()),
-    questions: q.map((x: any) => ({
-      questionId: String(x.question_id || x.questionId || ""),
-      awarded: Number(x.awarded_marks ?? x.awarded ?? 0),
-      max: Number(x.max_marks ?? x.max ?? 0),
-      ocrConfidence: Number(x.ocr_confidence ?? x.ocrConfidence ?? 0),
-      ocrText: String(x.student_answer ?? x.ocrText ?? ""),
-      feedback: String(x.feedback ?? ""),
-      rubric: {
-        correctness: Number(x.rubric_scores?.factual_accuracy ?? x.rubric?.correctness ?? 0),
-        completeness: Number(x.rubric_scores?.conceptual_completeness ?? x.rubric?.completeness ?? 0),
-        clarity: Number(x.rubric_scores?.domain_terminology ?? x.rubric?.clarity ?? 0),
-        reasoning: Number(x.rubric_scores?.reasoning ?? x.rubric?.reasoning ?? 0),
-      },
-      matchedChunkId: x.matched_chunk_id || x.matchedChunkId,
-      flags: Array.isArray(x.flags) ? x.flags.map(String) : [],
-    })),
+    sheet_id: id,
+    exam_id: String(row.exam_id ?? ""),
+    filename: String(row.filename ?? id),
+    pages: Number(row.page_count ?? row.pages ?? 1),
+    ingested: status === "ingested" || status === "evaluated",
+    status,
   };
 }
 
-export const api = {
-  async listExams(): Promise<Exam[]> {
-    const r = await req("/api/exams");
-    const rows = (await r.json()) as Array<Record<string, any>>;
-    return rows.map((x) => ({
-      id: String(x.id),
-      title: String(x.title || x.id),
-      createdAt: String(x.last_eval_at || new Date().toISOString()),
-    }));
-  },
+function rubricFromScores(rs: Record<string, unknown> | undefined): RubricBreakdown[] {
+  if (!rs) return [];
+  const items: RubricBreakdown[] = [
+    { criterion: "Factual accuracy", awarded: Number(rs.factual_accuracy ?? 0), max: 4 },
+    { criterion: "Completeness", awarded: Number(rs.conceptual_completeness ?? 0), max: 4 },
+    { criterion: "Terminology", awarded: Number(rs.domain_terminology ?? 0), max: 4 },
+    { criterion: "Reasoning", awarded: Number(rs.reasoning ?? 0), max: 4 },
+  ];
+  return items.filter((x) => x.awarded > 0 || x.max > 0);
+}
 
-  async listExamsWithCounts(): Promise<ExamSummary[]> {
-    const r = await req("/api/exams");
-    const rows = (await r.json()) as Array<Record<string, any>>;
-    return rows.map((x) => ({
-      examId: String(x.id),
-      title: String(x.title || x.id),
-      keyCount: Number(x.key_count || 0),
-      sheetCount: Number(x.sheet_count || 0),
-      lastEvalAt: x.last_eval_at ? String(x.last_eval_at) : null,
-    }));
-  },
+function confToNumber(v: unknown, ocr: number): number {
+  if (typeof v === "number") return v;
+  if (typeof v === "string") {
+    const x = v.toLowerCase();
+    if (x === "high") return 0.9;
+    if (x === "medium") return 0.7;
+    if (x === "low") return 0.45;
+    const n = Number(v);
+    if (Number.isFinite(n)) return n;
+  }
+  return ocr;
+}
 
-  async getExam(examId: string): Promise<{ exam: Exam; keys: AnswerKey[]; sheets: Sheet[] } | null> {
-    try {
-      const r = await req(`/api/exams/${encodeURIComponent(examId)}`);
-      const j = (await r.json()) as Record<string, any>;
-      return {
-        exam: {
-          id: String(j.exam?.id || examId),
-          title: String(j.exam?.title || examId),
-          createdAt: new Date().toISOString(),
-        },
-        keys: (Array.isArray(j.keys) ? j.keys : []).map((k: any, i: number) => ({
-          id: String(k.id),
-          examId: String(k.exam_id || examId),
-          questionId: String(k.question_id || ""),
-          prompt: String(k.question_id || ""),
-          answer: String(k.expected_answer || ""),
-          maxMarks: Number(k.max_marks || 0),
-          sortOrder: Number(k.sort_order ?? i),
-          vector: Array.isArray(k.embedding) ? k.embedding.slice(0, 16).map(Number) : [],
-        })),
-        sheets: (Array.isArray(j.sheets) ? j.sheets : []).map((s: any) => mapSheet(s)),
-      };
-    } catch {
-      return null;
-    }
-  },
+function mapQuestion(q: Record<string, unknown>, index?: number): QuestionResult {
+  const flags = Array.isArray(q.flags) ? (q.flags as string[]) : [];
+  const ocr = Number(q.ocr_confidence ?? 0);
+  const regionIndex = Number(q.region_index ?? index ?? 0);
+  const qid = String(q.question_id ?? "");
+  return {
+    question_id: qid,
+    region_index: regionIndex,
+    question_text: qid,
+    expected_answer: "",
+    student_answer: String(q.student_answer ?? ""),
+    ocr_raw: String(q.ocr_raw ?? q.student_answer ?? ""),
+    ocr_text: String(q.ocr_raw ?? q.student_answer ?? ""),
+    awarded_marks: Number(q.awarded_marks ?? 0),
+    max_marks: Number(q.max_marks ?? 0),
+    confidence: confToNumber(q.grading_confidence, ocr),
+    rationale: String(q.feedback ?? ""),
+    rubric: rubricFromScores(q.rubric_scores as Record<string, unknown> | undefined),
+    flags: { rag_context_used: flags.includes("rag_context_used") },
+  };
+}
 
-  async createExam(title: string): Promise<Exam> {
-    const id = title.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "");
-    return { id: id || "exam", title, createdAt: new Date().toISOString() };
-  },
-
-  async uploadKeyFile(
-    examId: string,
-    file: File,
-    defaultMaxMarks = 4,
-  ): Promise<{ keyIds: string[] }> {
-    const fd = new FormData();
-    fd.append("file", file);
-    fd.append("exam_id", examId);
-    fd.append("default_max_marks", String(defaultMaxMarks));
-    const r = await req("/upload/key/file", { method: "POST", body: fd });
-    const out = (await r.json()) as { key_ids: string[] };
-    return { keyIds: out.key_ids };
-  },
-
-  async ingestExamRag(examId: string, sheetId?: string): Promise<Record<string, unknown>> {
-    const q = sheetId ? `?sheet_id=${encodeURIComponent(sheetId)}` : "";
-    const r = await req(`/api/exam/${encodeURIComponent(examId)}/ingest-rag${q}`, {
-      method: "POST",
+function mapEvaluationResult(raw: Record<string, unknown>): EvaluationResult {
+  const questions = Array.isArray(raw.questions)
+    ? (raw.questions as Record<string, unknown>[]).map((q, i) => mapQuestion(q, i))
+    : [];
+  const qids = questions.map((q) => q.question_id);
+  if (qids.length > 1 && new Set(qids).size < qids.length) {
+    questions.forEach((q, i) => {
+      q.region_index = i;
     });
-    return (await r.json()) as Record<string, unknown>;
-  },
+  }
+  const llm = String(raw.llm_model ?? "");
+  return {
+    result_id: String(raw.id ?? raw.result_id ?? ""),
+    sheet_id: String(raw.sheet_id ?? ""),
+    exam_id: String(raw.exam_id ?? ""),
+    total_awarded: Number(raw.total_marks ?? raw.total_awarded ?? 0),
+    total_max: Number(raw.max_total ?? raw.total_max ?? 0),
+    questions,
+    used_llm: llm.length > 0 && !llm.startsWith("fallback"),
+    client_only: false,
+  };
+}
 
-  async createKeys(
-    examId: string,
-    rows: Array<{ questionId: string; prompt: string; answer: string; maxMarks: number }>,
-  ): Promise<AnswerKey[]> {
-    const payload = {
-      exam_id: examId,
-      questions: rows.map((r, i) => ({
-        question_id: r.questionId || `Q${i + 1}`,
-        expected_answer: r.answer,
-        max_marks: r.maxMarks,
-        domain: "general",
-      })),
-    };
-    const res = await req("/upload/key", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    });
-    const out = (await res.json()) as { key_ids: string[] };
-    return out.key_ids.map((id, i) => ({
-      id,
-      examId,
-      questionId: rows[i]?.questionId || `Q${i + 1}`,
-      prompt: rows[i]?.prompt || rows[i]?.questionId || `Q${i + 1}`,
-      answer: rows[i]?.answer || "",
-      maxMarks: rows[i]?.maxMarks || 0,
-      sortOrder: i,
-      vector: [],
-    }));
-  },
+function mapRagChunkRow(row: Record<string, unknown>): RagChunk {
+  const m = (row.meta ?? {}) as Record<string, unknown>;
+  return {
+    chunk_id: String(row.chunk_id ?? row.id ?? ""),
+    text: String(row.text ?? row.text_content ?? ""),
+    page: Number(row.page ?? m.source_page ?? 1),
+    region: String(row.region ?? m.region_id ?? ""),
+    score: row.score != null ? Number(row.score) : undefined,
+  };
+}
 
-  async listSheets(filter?: { examId?: string }): Promise<Sheet[]> {
-    const q = filter?.examId ? `?exam_id=${encodeURIComponent(filter.examId)}` : "";
-    const r = await req(`/api/sheets${q}`);
-    const rows = (await r.json()) as Array<Record<string, any>>;
-    return rows.map((x) => mapSheet(x));
-  },
+function corpusLabel(documentId: string, meta: Record<string, unknown>): string {
+  if (String(meta.kind) === "answer_key" || documentId.startsWith("keys_")) return "answer_key";
+  return "sheet";
+}
 
-  async getSheet(sheetId: string): Promise<Sheet | null> {
-    const rows = await this.listSheets();
-    return rows.find((x) => x.id === sheetId) ?? null;
-  },
+// ---------- Connectivity ----------
 
-  async ingestSheet(sheetId: string, force = true): Promise<Record<string, unknown>> {
-    const r = await req(
-      `/api/sheet/${encodeURIComponent(sheetId)}/ingest?force=${force ? "true" : "false"}`,
-      { method: "POST" },
-    );
-    return (await r.json()) as Record<string, unknown>;
-  },
+export const getDatabaseStatus = () => request<DatabaseStatus>("/api/database/status");
 
-  async getSheetChunks(sheetId: string): Promise<RagChunk[]> {
-    const r = await req(`/api/sheet/${encodeURIComponent(sheetId)}/chunks`);
-    const rows = (await r.json()) as Array<Record<string, any>>;
-    return rows.map((x) => ({
-      id: String(x.chunk_id),
-      documentId: String(x.document_id || ""),
-      sheetId,
-      examId: (x.meta?.exam_id as string | undefined) ?? undefined,
-      page: Number(x.page || 1),
-      region: String(x.region || ""),
-      text: String(x.text || ""),
-      ocrConfidence: Number(x.ocr_confidence || 0),
-      vector: [],
-    }));
-  },
+export const getIntegrations = () => request<IntegrationsStatus>("/api/integrations");
 
-  async uploadExamBundle(input: {
-    examId: string;
-    keyFile: File;
-    sheetFile: File;
-    defaultMaxMarks?: number;
-  }): Promise<{ examId: string; keyIds: string[]; sheetId: string; filename: string }> {
-    const fd = new FormData();
-    fd.append("exam_id", input.examId);
-    fd.append("key_file", input.keyFile);
-    fd.append("sheet_file", input.sheetFile);
-    if (input.defaultMaxMarks != null) {
-      fd.append("default_max_marks", String(input.defaultMaxMarks));
-    }
-    const r = await req("/upload/exam-bundle", { method: "POST", body: fd });
-    const out = (await r.json()) as {
-      exam_id: string;
-      key_ids: string[];
-      sheet_id: string;
-      filename: string;
-    };
-    return {
-      examId: out.exam_id,
-      keyIds: out.key_ids,
-      sheetId: out.sheet_id,
-      filename: out.filename,
-    };
-  },
+export const getHealth = () => request<Record<string, unknown>>("/health");
 
-  async createSheet(input: {
-    filename: string;
-    examId: string | null;
-    file?: File;
-    pageCount?: number;
-  }): Promise<Sheet> {
-    if (!input.file) throw new Error("Pick a file");
-    const fd = new FormData();
-    fd.append("file", input.file);
-    if (input.examId) fd.append("exam_id", input.examId);
-    const r = await req("/upload/sheet", { method: "POST", body: fd });
-    const out = (await r.json()) as { sheet_id: string; filename: string; exam_id?: string };
-    return mapSheet({
-      id: out.sheet_id,
-      filename: out.filename,
-      exam_id: out.exam_id ?? input.examId,
-      page_count: input.pageCount || 1,
-      status: "uploaded",
-      ocr_engine: "unknown",
-      created_at: new Date().toISOString(),
-    });
-  },
+// ---------- Exams & keys ----------
 
-  async updateSheetExam(_sheetId: string, _examId: string): Promise<void> {
-    throw new Error("updateSheetExam is not implemented yet");
-  },
-
-  async listResults(filter?: { examId?: string; sheetId?: string }): Promise<EvaluationResult[]> {
-    const params = new URLSearchParams();
-    if (filter?.examId) params.set("exam_id", filter.examId);
-    if (filter?.sheetId) params.set("sheet_id", filter.sheetId);
-    const q = params.toString() ? `?${params.toString()}` : "";
-    const r = await req(`/api/results${q}`);
-    const rows = (await r.json()) as Array<Record<string, any>>;
-    return rows.map((x) => mapResult(x));
-  },
-
-  async getResult(resultId: string): Promise<EvaluationResult | null> {
-    try {
-      const r = await req(`/result/${encodeURIComponent(resultId)}`);
-      const j = (await r.json()) as Record<string, any>;
-      return mapResult({
-        id: j.result_id,
-        sheet_id: j.sheet_id,
-        exam_id: j.exam_id,
-        total_marks: j.total_marks,
-        max_total: j.max_total,
-        confidence_flag: j.confidence_flag,
-        grading_confidence: j.grading_confidence,
-        prompt_hash: j.prompt_hash,
-        llm_model: j.llm_model,
-        questions: j.questions,
-      });
-    } catch {
-      return null;
-    }
-  },
-
-  async metricsOverview(): Promise<MetricsOverview> {
-    const r = await req("/api/metrics/overview");
-    const x = (await r.json()) as Record<string, any>;
-    return {
-      sheets: Number(x.sheets || 0),
-      keys: Number(x.keys || 0),
-      results: Number(x.results || 0),
-      exams: Number(x.exams || 0),
-      lowConfidenceRate: Number(x.low_confidence_rate || 0),
-      avgTotalPct: Number(x.avg_total_pct || 0),
-      last24h: Number(x.last_24h || 0),
-    };
-  },
-
-  /** Server-side checklist (LLM/Gemini is configured on the API process, not in the browser). */
-  async integrations(): Promise<{
-    llm_gemini?: { GRADE_ENABLE_LLM?: boolean; api_key_present?: boolean; ready?: boolean };
-  }> {
-    const r = await req("/api/integrations");
-    return (await r.json()) as {
-      llm_gemini?: { GRADE_ENABLE_LLM?: boolean; api_key_present?: boolean; ready?: boolean };
-    };
-  },
-
-  /**
-   * Full pipeline: load sheet PDF from storage, OCR patches, match keys, score (Gemini when
-   * `GRADE_ENABLE_LLM` + `GRADE_GEMINI_API_KEY` are set on the API server), persist result.
-   */
-  async evaluate(input: {
-    sheetId: string;
-    examId: string;
-    topK?: number;
-    expectedNumRegions?: number | null;
-    useConsensusOcr?: boolean;
-  }): Promise<EvaluationResult> {
-    let expectedNumRegions: number | null = input.expectedNumRegions ?? null;
-    if (expectedNumRegions != null && !Number.isFinite(expectedNumRegions)) {
-      expectedNumRegions = null;
-    }
-    const r = await req("/evaluate", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        sheet_id: input.sheetId,
-        exam_id: input.examId,
-        top_k: input.topK ?? 3,
-        expected_num_regions: expectedNumRegions,
-        use_consensus_ocr: input.useConsensusOcr ?? false,
-      }),
-    });
-    const j = (await r.json()) as Record<string, any>;
-    return mapResult({
-      id: j.result_id,
-      sheet_id: j.sheet_id,
-      exam_id: j.exam_id,
-      total_marks: j.total_marks,
-      max_total: j.max_total,
-      confidence_flag: j.confidence_flag,
-      grading_confidence: j.grading_confidence,
-      prompt_hash: j.prompt_hash,
-      llm_model: j.llm_model,
-      questions: j.questions,
-      created_at: new Date().toISOString(),
-    });
-  },
-
-  async ragSearch(input: {
-    query: string;
-    examId?: string;
-    sheetId?: string;
-    topK?: number;
-  }): Promise<RagSearchHit[]> {
-    const r = await req("/api/rag/search", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        query: input.query,
-        exam_id: input.examId,
-        sheet_id: input.sheetId,
-        top_k: input.topK ?? 5,
-      }),
-    });
-    const rows = (await r.json()) as Array<Record<string, any>>;
-    return rows.map((x) => ({
-      chunkId: String(x.chunk_id),
-      documentId: String(x.document_id || ""),
-      text: String(x.text || ""),
-      score: Number(x.score || 0),
-      page: Number(x.page || 1),
-      region: String(x.region || ""),
-      sheetId: x.sheet_id ? String(x.sheet_id) : undefined,
-      examId: x.exam_id ? String(x.exam_id) : undefined,
-    }));
-  },
-
-  saveResult(_r: EvaluationResult) {
-    // no-op in real backend mode
-  },
-
-  buildSyntheticResult(_sheetId: string, _examId: string): EvaluationResult {
-    throw new Error("Synthetic result is unavailable in real backend mode");
-  },
+export const listExams = async () => {
+  const rows = await request<Array<Record<string, unknown>>>("/api/exams");
+  return rows.map(mapExamSummary);
 };
+
+export const getExam = async (id: string) => {
+  const raw = await request<{
+    exam?: Record<string, unknown>;
+    keys?: Array<Record<string, unknown>>;
+    sheets?: Array<Record<string, unknown>>;
+  }>(`/api/exams/${encodeURIComponent(id)}`);
+  const keysArr = Array.isArray(raw.keys) ? raw.keys : [];
+  return {
+    exam: mapExamSummary({
+      id: raw.exam?.id ?? id,
+      title: raw.exam?.title ?? id,
+      key_count: keysArr.length,
+      sheet_count: (raw.sheets ?? []).length,
+    }),
+    keys: {
+      exam_id: id,
+      title: String(raw.exam?.title ?? id),
+      questions: keysArr.map((k, i) => ({
+        question_id: String(k.question_id ?? `Q${i + 1}`),
+        question_text: String(k.question_id ?? ""),
+        expected_answer: String(k.expected_answer ?? ""),
+        max_marks: Number(k.max_marks ?? 0),
+      })),
+    } satisfies AnswerKey,
+    sheets: (raw.sheets ?? []).map(mapSheet),
+  };
+};
+
+export const uploadKeyJson = (body: {
+  exam_id: string;
+  questions: Array<{
+    question_id: string;
+    expected_answer: string;
+    max_marks: number;
+    domain?: string;
+  }>;
+}) =>
+  request<{ exam_id: string; key_ids?: string[] }>("/upload/key", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+
+export const uploadKeyFile = (args: {
+  file: File;
+  exam_id: string;
+  default_max_marks?: number;
+}) => {
+  const fd = new FormData();
+  fd.append("file", args.file);
+  fd.append("exam_id", args.exam_id);
+  if (args.default_max_marks != null) {
+    fd.append("default_max_marks", String(args.default_max_marks));
+  }
+  return request<{ exam_id: string; key_ids: string[]; questions?: number }>(
+    "/upload/key/file",
+    { method: "POST", body: fd },
+  ).then((r) => ({
+    exam_id: args.exam_id,
+    questions: r.key_ids?.length ?? 0,
+  }));
+};
+
+export const ingestExamRag = async (examId: string, sheetId?: string) => {
+  const qs = sheetId ? `?sheet_id=${encodeURIComponent(sheetId)}` : "";
+  const raw = await request<Record<string, unknown>>(
+    `/api/exam/${encodeURIComponent(examId)}/ingest-rag${qs}`,
+    { method: "POST" },
+  );
+  const keys = (raw.keys ?? {}) as Record<string, unknown>;
+  const sheet = (raw.sheet ?? {}) as Record<string, unknown>;
+  const chunks =
+    Number(keys.key_count ?? keys.chunks_saved ?? 0) +
+    Number(sheet.chunks_saved ?? 0);
+  return { exam_id: examId, chunks };
+};
+
+// ---------- Sheets ----------
+
+export const listSheets = async () => {
+  const rows = await request<Array<Record<string, unknown>>>("/api/sheets");
+  return rows.map(mapSheet);
+};
+
+export const uploadSheet = async (args: { file: File; exam_id: string }) => {
+  const fd = new FormData();
+  fd.append("file", args.file);
+  fd.append("exam_id", args.exam_id);
+  const raw = await request<{ sheet_id: string; filename: string; exam_id?: string }>(
+    "/upload/sheet",
+    { method: "POST", body: fd },
+  );
+  return mapSheet({
+    id: raw.sheet_id,
+    filename: raw.filename,
+    exam_id: raw.exam_id ?? args.exam_id,
+    status: "ingested",
+    page_count: args.file.type === "application/pdf" ? 2 : 1,
+  });
+};
+
+export const uploadExamBundle = async (args: {
+  exam_id: string;
+  key_file: File;
+  sheet_file: File;
+  default_max_marks?: number;
+}) => {
+  const fd = new FormData();
+  fd.append("exam_id", args.exam_id);
+  fd.append("key_file", args.key_file);
+  fd.append("sheet_file", args.sheet_file);
+  if (args.default_max_marks != null) {
+    fd.append("default_max_marks", String(args.default_max_marks));
+  }
+  const raw = await request<{
+    exam_id: string;
+    sheet_id: string;
+    filename: string;
+    key_ids: string[];
+  }>("/upload/exam-bundle", { method: "POST", body: fd });
+  return {
+    exam_id: raw.exam_id,
+    sheet_id: raw.sheet_id,
+    filename: raw.filename,
+  };
+};
+
+export const ingestSheet = async (sheetId: string, force = true) => {
+  const raw = await request<Record<string, unknown>>(
+    `/api/sheet/${encodeURIComponent(sheetId)}/ingest?force=${force}`,
+    { method: "POST" },
+  );
+  return {
+    sheet_id: sheetId,
+    chunks: Number(raw.chunks_saved ?? 0),
+  };
+};
+
+export const getSheetChunks = async (sheetId: string) => {
+  const rows = await request<Array<Record<string, unknown>>>(
+    `/api/sheet/${encodeURIComponent(sheetId)}/chunks`,
+  );
+  return rows.map((x) =>
+    mapRagChunkRow({
+      chunk_id: x.chunk_id,
+      text: x.text,
+      page: x.page,
+      region: x.region,
+      meta: x.meta,
+    }),
+  );
+};
+
+export const getSheetFileUrl = (sheetId: string) =>
+  `${BASE}/sheet/${encodeURIComponent(sheetId)}/file`;
+
+export const getSheetMime = (filename?: string) =>
+  filename ? guessMime(filename) : undefined;
+
+// ---------- Evaluate & results ----------
+
+export interface EvaluateInput {
+  sheet_id: string;
+  exam_id: string;
+  top_k?: number;
+  expected_num_regions?: number | null;
+  use_consensus_ocr?: boolean;
+}
+
+export const evaluate = async (input: EvaluateInput) => {
+  const raw = await request<Record<string, unknown>>("/evaluate", {
+    method: "POST",
+    body: JSON.stringify({
+      sheet_id: input.sheet_id,
+      exam_id: input.exam_id,
+      top_k: input.top_k ?? 3,
+      expected_num_regions: input.expected_num_regions ?? null,
+      use_consensus_ocr: input.use_consensus_ocr ?? false,
+    }),
+  });
+  return mapEvaluationResult(raw);
+};
+
+export const getResult = async (id: string) => {
+  const raw = await request<Record<string, unknown>>(`/result/${encodeURIComponent(id)}`);
+  return mapEvaluationResult({
+    ...raw,
+    id: raw.result_id ?? id,
+    questions: raw.questions,
+  });
+};
+
+export const listResults = async () => {
+  const rows = await request<Array<Record<string, unknown>>>("/api/results");
+  return rows.map((r) =>
+    mapEvaluationResult({
+      ...r,
+      id: r.id ?? r.result_id,
+    }),
+  );
+};
+
+export const getReportPdfUrl = (id: string) =>
+  `${BASE}/report/${encodeURIComponent(id)}/pdf`;
+
+// ---------- RAG ----------
+
+export const ragSearch = async (args: {
+  query: string;
+  exam_id?: string;
+  sheet_id?: string;
+  top_k?: number;
+}) => {
+  const rows = await request<Array<Record<string, unknown>>>("/api/rag/search", {
+    method: "POST",
+    body: JSON.stringify({
+      query: args.query,
+      exam_id: args.exam_id,
+      sheet_id: args.sheet_id,
+      top_k: args.top_k ?? 5,
+    }),
+  });
+  const hits: RagSearchHit[] = rows.map((row) => {
+    const docId = String(row.document_id ?? "");
+    const meta = (row.meta ?? {}) as Record<string, unknown>;
+    return {
+      corpus: corpusLabel(docId, meta),
+      chunk: mapRagChunkRow({
+        chunk_id: row.chunk_id,
+        text: row.text,
+        page: row.page,
+        region: row.region,
+        score: row.score,
+      }),
+    };
+  });
+  return { hits };
+};
+
+// ---------- Metrics ----------
+
+export const getMetricsOverview = async (): Promise<MetricsOverview> => {
+  const [m, db] = await Promise.all([
+    request<Record<string, unknown>>("/api/metrics/overview"),
+    getDatabaseStatus().catch(() => null),
+  ]);
+  return {
+    total_exams: Number(m.exams ?? 0),
+    total_keys: Number(m.keys ?? 0),
+    total_sheets: Number(m.sheets ?? 0),
+    total_results: Number(m.results ?? 0),
+    rag_chunks: Number(db?.counts?.rag_chunks ?? 0),
+    avg_score: Number(m.avg_total_pct ?? 0),
+  };
+};
+
+// ---------- Helpers ----------
+
+export const slugifyExamId = (title: string) =>
+  title
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 64) || `exam-${Date.now()}`;

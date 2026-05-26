@@ -1,42 +1,35 @@
-import { defineConfig } from "vite";
-import react from "@vitejs/plugin-react-swc";
-import path from "path";
-import { componentTagger } from "lovable-tagger";
+// @lovable.dev/vite-tanstack-config already includes the following — do NOT add them manually
+// or the app will break with duplicate plugins:
+//   - tanstackStart, viteReact, tailwindcss, tsConfigPaths, cloudflare (build-only),
+//     componentTagger (dev-only), VITE_* env injection, @ path alias, React/TanStack dedupe,
+//     error logger plugins, and sandbox detection (port/host/strictPort).
+import { defineConfig } from "@lovable.dev/vite-tanstack-config";
 
-export default defineConfig(({ mode }) => ({
-  server: {
-    host: "0.0.0.0",
-    port: 5173,
-    strictPort: true,
-    hmr: {
-      overlay: false,
-    },
-    proxy: {
-      "/health": "http://127.0.0.1:8000",
-      "/api": "http://127.0.0.1:8000",
-      "/upload/key": "http://127.0.0.1:8000",
-      "/upload/sheet": "http://127.0.0.1:8000",
-      "/upload/exam-bundle": "http://127.0.0.1:8000",
-      "/evaluate": {
-        target: "http://127.0.0.1:8000",
-        changeOrigin: true,
-        bypass(req) {
-          if (req.method === "GET" || req.method === "HEAD") {
-            return "/index.html";
-          }
-        },
-      },
-      // Trailing slash so "/results" and "/sheets" (React routes) are not prefix-matched.
-      "/result/": "http://127.0.0.1:8000",
-      "/report/": "http://127.0.0.1:8000",
-      "/sheet/": "http://127.0.0.1:8000",
+const FASTAPI = "http://127.0.0.1:8000";
+const proxy: Record<string, unknown> = {
+  "/api": FASTAPI,
+  "/upload": FASTAPI,
+  "/health": FASTAPI,
+  "/result/": FASTAPI,
+  "/report/": FASTAPI,
+  "/sheet/": FASTAPI,
+  "/evaluate": {
+    target: FASTAPI,
+    changeOrigin: true,
+    bypass(req) {
+      if (req.method === "GET" || req.method === "HEAD") {
+        return "/index.html";
+      }
     },
   },
-  plugins: [react(), mode === "development" && componentTagger()].filter(Boolean),
-  resolve: {
-    alias: {
-      "@": path.resolve(__dirname, "./src"),
-    },
-    dedupe: ["react", "react-dom", "react/jsx-runtime", "react/jsx-dev-runtime", "@tanstack/react-query", "@tanstack/query-core"],
+};
+
+export default defineConfig({
+  tanstackStart: {
+    server: { entry: "server" },
   },
-}));
+  vite: {
+    server: { proxy },
+    preview: { proxy },
+  },
+});

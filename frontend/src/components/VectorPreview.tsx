@@ -1,23 +1,37 @@
-import { cn } from "@/lib/utils";
+interface Props {
+  vector?: number[];
+  width?: number;
+  height?: number;
+}
 
-/** Tiny sparkbar visualization of a vector for at-a-glance recognition. */
-export function VectorPreview({ vector, className }: { vector: number[]; className?: string }) {
+// Compact sparkline-style preview of a vector embedding.
+export function VectorPreview({ vector, width = 220, height = 36 }: Props) {
+  if (!vector || vector.length === 0) {
+    return (
+      <div className="text-xs text-muted-foreground">no embedding</div>
+    );
+  }
+  const sample = vector.length > 64 ? vector.filter((_, i) => i % Math.ceil(vector.length / 64) === 0) : vector;
+  const min = Math.min(...sample);
+  const max = Math.max(...sample);
+  const range = max - min || 1;
+  const step = width / sample.length;
   return (
-    <div className={cn("flex h-6 items-end gap-px", className)} title={`${vector.length}-D vector`}>
-      {vector.map((v, i) => {
-        const h = Math.max(2, Math.abs(v) * 100);
-        const positive = v >= 0;
+    <svg width={width} height={height} className="text-primary">
+      {sample.map((v, i) => {
+        const h = ((v - min) / range) * (height - 4);
         return (
-          <span
+          <rect
             key={i}
-            className={cn(
-              "w-1 rounded-sm",
-              positive ? "bg-primary/70" : "bg-accent/70",
-            )}
-            style={{ height: `${h}%` }}
+            x={i * step}
+            y={height - h}
+            width={Math.max(1, step - 1)}
+            height={h}
+            fill="currentColor"
+            opacity={0.7}
           />
         );
       })}
-    </div>
+    </svg>
   );
 }

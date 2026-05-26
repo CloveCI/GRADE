@@ -13,13 +13,14 @@ import os
 import tempfile
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Dict, List
+from typing import Any, Dict, List
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
 
 from autograder.db import (
+    database_status,
     get_rag_chunks_for_sheet,
     get_result,
     get_sheet,
@@ -52,6 +53,7 @@ from autograder.ocr import (
 from autograder.preprocessing import PATCH_SIZE, preprocess_pipeline
 from autograder.report_pdf import build_evaluation_pdf
 from autograder.scoring import prompt_hash, score_answer_llm
+from autograder.text_format import format_student_answer
 from autograder.schemas import (
     EvaluateRequest,
     EvaluateResponse,
@@ -105,6 +107,7 @@ async def _parse_key_upload(
 
 
 def _save_sheet_bytes(filename: str, data: bytes, exam_id: str) -> UploadSheetResponse:
+    _require_database(need_rag=True)
     exid = exam_id.strip()
     if not exid:
         raise HTTPException(
@@ -216,9 +219,79 @@ def _cors_origins() -> List[str]:
     return [o.strip() for o in raw.split(",") if o.strip()]
 
 
+def _probe_gemini_live() -> Dict[str, Any]:
+    """One-token live call to verify the API key and Generative Language API access."""
+    api_key = (
+        os.environ.get("GRADE_GEMINI_API_KEY", "").strip()
+        or os.environ.get("GEMINI_API_KEY", "").strip()
+    )
+    model_id = os.environ.get("GRADE_LLM_MODEL", "gemini-2.0-flash")
+    if not api_key:
+        return {"ok": False, "model": model_id, "error": "no_api_key"}
+    try:
+        import google.generativeai as genai
+
+        genai.configure(api_key=api_key)
+        gm = genai.GenerativeModel(model_id)
+        resp = gm.generate_content(
+            "Reply with exactly: OK",
+            generation_config=genai.GenerationConfig(temperature=0.0),
+        )
+        text = (resp.text or "").strip()
+        return {"ok": bool(text), "model": model_id, "reply": text[:80]}
+    except Exception as exc:
+        return {"ok": False, "model": model_id, "error": str(exc)[:500]}
+
+
+def _require_database(*, need_rag: bool = False, need_evaluation: bool = False) -> Dict[str, Any]:
+    """Raise 503 when Postgres is not reachable or required tables are missing."""
+    st = database_status()
+    if not st["configured"]:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "GRADE_DATABASE_URL is not set. Copy .env.example to .env and use "
+                "postgresql://grade:grade@127.0.0.1:5433/grade_test after docker compose up -d."
+            ),
+        )
+    if not st["connected"]:
+        raise HTTPException(
+            status_code=503,
+            detail=st.get("error") or "Database connection failed",
+        )
+    if not st.get("schema_ready"):
+        raise HTTPException(
+            status_code=503,
+            detail=st.get("error") or "Database schema not ready; restart API after Postgres is up.",
+        )
+    if need_rag and not st.get("rag_ready"):
+        raise HTTPException(
+            status_code=503,
+            detail="RAG storage not ready (pgvector extension and public.rag_chunks required).",
+        )
+    if need_evaluation and not st.get("evaluation_ready"):
+        raise HTTPException(
+            status_code=503,
+            detail="Evaluation storage not ready (public.evaluation_results required).",
+        )
+    return st
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    init_db()
+    st = database_status()
+    app.state.database_status = st
+    if st.get("connected") and st.get("schema_ready"):
+        try:
+            init_db()
+        except Exception as e:
+            logger.exception("init_db failed")
+            st = {**st, "connected": False, "schema_ready": False, "error": str(e)}
+            app.state.database_status = st
+    elif st.get("configured"):
+        logger.warning("PostgreSQL unavailable at startup: %s", st.get("error"))
+    else:
+        logger.warning("GRADE_DATABASE_URL not set; uploads and evaluate will return 503")
     Path("data/uploads").mkdir(parents=True, exist_ok=True)
     yield
 
@@ -241,21 +314,29 @@ app.add_middleware(
 
 @app.get("/health")
 def health():
-    use_pg = bool(
-        (os.environ.get("GRADE_DATABASE_URL") or os.environ.get("DATABASE_URL") or "").strip()
-    )
+    db = database_status()
+    storage = "postgres" if db.get("connected") else ("configured" if db.get("configured") else "unconfigured")
     return {
-        "status": "ok",
+        "status": "ok" if db.get("connected") else "degraded",
         "phase": "5",
         "version": "v2-ui",
+        "database": db,
         "integrations": {
             "preprocessing": True,
             "ocr": True,
-            "storage_backend": "postgres" if use_pg else "unconfigured",
+            "storage_backend": storage,
+            "rag_ready": bool(db.get("rag_ready")),
+            "evaluation_ready": bool(db.get("evaluation_ready")),
             "scoring_llm_fallback": True,
             "pdf_report": True,
         },
     }
+
+
+@app.get("/api/database/status")
+def api_database_status():
+    """Postgres + pgvector connectivity for RAG chunks and persisted evaluation results."""
+    return database_status()
 
 
 @app.get("/api/integrations")
@@ -281,16 +362,8 @@ def integrations_status():
         os.environ.get("GRADE_GEMINI_API_KEY", "").strip()
         or os.environ.get("GEMINI_API_KEY", "").strip()
     )
-    db_url_set = bool(
-        (os.environ.get("GRADE_DATABASE_URL") or os.environ.get("DATABASE_URL") or "").strip()
-    )
-    pg_deps_ok = True
-    if db_url_set:
-        try:
-            import psycopg  # noqa: F401
-            import pgvector  # noqa: F401
-        except ImportError:
-            pg_deps_ok = False
+    gem_probe = _probe_gemini_live() if llm_flag and gem_key else None
+    db = database_status()
 
     gcv_installed = True
     try:
@@ -329,14 +402,25 @@ def integrations_status():
         "llm_gemini": {
             "GRADE_ENABLE_LLM": llm_flag,
             "api_key_present": gem_key,
-            "ready": llm_flag and gem_key,
+            "ready": llm_flag and gem_key and bool(gem_probe and gem_probe.get("ok")),
+            "live_probe": gem_probe,
         },
         "phase_3_db": {
             "module": "autograder.db",
             "backend": "postgres",
-            "database_url_set": db_url_set,
-            "postgres_deps_installed": pg_deps_ok,
-            "ok": bool(db_url_set and pg_deps_ok),
+            **db,
+            "ok": bool(db.get("connected") and db.get("schema_ready")),
+        },
+        "rag_storage": {
+            "backend": "public.rag_chunks",
+            "pgvector": db.get("pgvector_extension"),
+            "ready": db.get("rag_ready"),
+            "chunk_count": (db.get("counts") or {}).get("rag_chunks", 0),
+        },
+        "evaluation_storage": {
+            "backend": "public.evaluation_results",
+            "ready": db.get("evaluation_ready"),
+            "result_count": (db.get("counts") or {}).get("evaluation_results", 0),
         },
         "phase_3_embeddings": {"module": "autograder.embeddings", "ok": True},
         "phase_3_scoring": {"module": "autograder.scoring", "ok": True},
@@ -350,6 +434,7 @@ def integrations_status():
 
 @app.post("/upload/key", response_model=UploadKeyResponse)
 def upload_key(payload: UploadKeyRequest):
+    _require_database(need_rag=True)
     if not payload.questions:
         raise HTTPException(status_code=400, detail="questions cannot be empty")
 
@@ -577,6 +662,7 @@ def api_metrics_overview():
 
 @app.post("/api/rag/search")
 def api_rag_search(payload: Dict):
+    _require_database(need_rag=True)
     query = str(payload.get("query") or "").strip()
     if not query:
         raise HTTPException(status_code=400, detail="query is required")
@@ -623,6 +709,7 @@ def api_rag_search(payload: Dict):
 
 @app.post("/evaluate", response_model=EvaluateResponse)
 def evaluate(req: EvaluateRequest):
+    _require_database(need_rag=True, need_evaluation=True)
     sheet = get_sheet(req.sheet_id)
     if not sheet:
         raise HTTPException(status_code=404, detail="sheet_id not found")
@@ -676,16 +763,20 @@ def evaluate(req: EvaluateRequest):
             ocr_engines.append(ocr_res.engine)
 
             chosen = match_answer_key(idx, ocr_res.text, keys, top_k=req.top_k)
+            formatted = format_student_answer(ocr_res.text, chosen)
+            student_text = formatted.formatted
+
             rag_ctx = retrieve_context_for_grading(
                 req.sheet_id,
                 req.exam_id,
-                ocr_res.text,
+                student_text,
                 chosen,
                 top_k=req.top_k,
+                region_index=idx,
             )
 
             eval_res, llm_model = score_answer_llm(
-                student_answer=ocr_res.text,
+                student_answer=student_text,
                 model_answer=chosen["expected_answer"],
                 max_marks=float(chosen["max_marks"]),
                 question_text=chosen["question_id"],
@@ -695,15 +786,21 @@ def evaluate(req: EvaluateRequest):
                 rag_context=rag_ctx.get("context_text"),
             )
 
-            flags = list(set((ocr_res.flags or []) + eval_res.flags))
+            flags = list(
+                set((ocr_res.flags or []) + formatted.flags + eval_res.flags)
+            )
             if rag_ctx.get("chunk_ids"):
                 flags.append("rag_context_used")
+            if formatted.method == "llm":
+                flags.append("ocr_llm_formatted")
             all_flags.extend(flags)
 
             q_results.append(
                 QuestionResult(
                     question_id=chosen["question_id"],
-                    student_answer=ocr_res.text,
+                    region_index=idx,
+                    student_answer=student_text,
+                    ocr_raw=ocr_res.text,
                     awarded_marks=eval_res.awarded_marks,
                     max_marks=eval_res.max_marks,
                     rubric_scores=eval_res.rubric_scores,

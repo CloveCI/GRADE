@@ -1,17 +1,16 @@
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 
-export function ConfidenceBadge({ value, flag }: { value: number; flag?: "ok" | "low" | "warn" }) {
-  const inferred = flag ?? (value > 0.85 ? "ok" : value > 0.7 ? "warn" : "low");
-  const cls =
-    inferred === "ok"
-      ? "bg-[hsl(var(--success))]/15 text-[hsl(var(--success))] border-[hsl(var(--success))]/30"
-      : inferred === "warn"
-        ? "bg-[hsl(var(--warning))]/15 text-[hsl(var(--warning))] border-[hsl(var(--warning))]/30"
-        : "bg-destructive/15 text-destructive border-destructive/30";
+export function ConfidenceBadge({ value }: { value?: number }) {
+  if (value == null) return <Badge variant="outline">n/a</Badge>;
+  const pct = Math.round(value * 100);
+  const tone =
+    pct >= 80 ? "border-success/40 bg-success/10 text-success" :
+    pct >= 50 ? "border-warning/40 bg-warning/10 text-warning" :
+                "border-destructive/40 bg-destructive/10 text-destructive";
   return (
-    <Badge variant="outline" className={cn("font-medium", cls)}>
-      {(value * 100).toFixed(0)}%
-    </Badge>
+    <span className={cn("inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-medium", tone)}>
+      {pct}% conf.
+    </span>
   );
 }

@@ -1,41 +1,18 @@
+import type { RagChunk } from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
-import { cn } from "@/lib/utils";
 
-interface ChunkPreviewProps {
-  text: string;
-  page?: number;
-  region?: string;
-  score?: number;
-  confidence?: number;
-  highlighted?: boolean;
-}
-
-export function ChunkPreview({
-  text,
-  page,
-  region,
-  score,
-  confidence,
-  highlighted,
-}: ChunkPreviewProps) {
+export function ChunkPreview({ chunk }: { chunk: RagChunk }) {
   return (
-    <div
-      className={cn(
-        "rounded-md border bg-card p-3 text-sm shadow-[var(--shadow-soft)]",
-        highlighted && "border-primary ring-2 ring-primary/30",
-      )}
-    >
-      <div className="mb-1 flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
-        {page !== undefined && <Badge variant="outline">p.{page}</Badge>}
-        {region && <Badge variant="outline">{region}</Badge>}
-        {score !== undefined && (
-          <Badge variant="secondary">score {score.toFixed(2)}</Badge>
-        )}
-        {confidence !== undefined && (
-          <Badge variant="secondary">ocr {(confidence * 100).toFixed(0)}%</Badge>
+    <div className="space-y-2 rounded-lg border border-border/60 bg-card/60 p-3">
+      <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+        <Badge variant="outline" className="font-mono">{chunk.chunk_id.slice(0, 8)}</Badge>
+        {chunk.page != null && <span>page {chunk.page}</span>}
+        {chunk.region && <span>region {chunk.region}</span>}
+        {chunk.score != null && (
+          <span className="ml-auto font-mono text-primary">score {chunk.score.toFixed(3)}</span>
         )}
       </div>
-      <p className="leading-relaxed text-foreground">{text}</p>
+      <p className="line-clamp-4 whitespace-pre-wrap text-sm text-foreground/90">{chunk.text}</p>
     </div>
   );
 }

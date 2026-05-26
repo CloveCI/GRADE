@@ -70,7 +70,9 @@ class EvaluationResult(BaseModel):
 
 class QuestionResult(BaseModel):
     question_id: str
-    student_answer: str
+    region_index: int = 0  # 0-based OCR patch index (unique per row when keys repeat)
+    student_answer: str  # OCR after cleanup (used for grading)
+    ocr_raw: str = ""  # original OCR before formatting
     awarded_marks: float
     max_marks: float
     rubric_scores: RubricScores

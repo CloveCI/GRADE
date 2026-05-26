@@ -1,25 +1,22 @@
-import { Card, CardContent } from "@/components/ui/card";
-import type { LucideIcon } from "lucide-react";
 import type { ReactNode } from "react";
+import { Card, CardContent } from "@/components/ui/card";
 
-interface EmptyStateProps {
-  icon: LucideIcon;
+interface Props {
+  icon?: ReactNode;
   title: string;
-  description: string;
+  description?: string;
   action?: ReactNode;
 }
 
-export function EmptyState({ icon: Icon, title, description, action }: EmptyStateProps) {
+export function EmptyState({ icon, title, description, action }: Props) {
   return (
-    <Card className="border-dashed">
-      <CardContent className="flex flex-col items-center justify-center gap-3 py-12 text-center">
-        <div className="flex h-12 w-12 items-center justify-center rounded-full bg-muted text-muted-foreground">
-          <Icon className="h-6 w-6" />
-        </div>
-        <div>
-          <h3 className="text-base font-medium text-foreground">{title}</h3>
-          <p className="mt-1 max-w-sm text-sm text-muted-foreground">{description}</p>
-        </div>
+    <Card className="glass-card">
+      <CardContent className="flex flex-col items-center gap-3 py-12 text-center">
+        {icon && <div className="text-primary/80">{icon}</div>}
+        <div className="text-base font-medium text-foreground">{title}</div>
+        {description && (
+          <p className="max-w-md text-sm text-muted-foreground">{description}</p>
+        )}
         {action}
       </CardContent>
     </Card>
