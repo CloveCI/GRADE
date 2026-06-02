@@ -184,10 +184,12 @@ def main() -> int:
         assert len(keys) == 1, keys
         emb = keys[0]["embedding"]
         assert len(emb) == EMBEDDING_DIMS, f"embedding length {len(emb)} != {EMBEDDING_DIMS}"
-        for i, (a, b) in enumerate(zip(emb, vec)):
-            if abs(float(a) - float(b)) > 1e-5:
-                raise AssertionError(f"embedding mismatch at index {i}: {a!r} vs {b!r}")
-        print(f"[ok] list_answer_keys + vector round-trip ({len(emb)} dims)")
+        chunks = keys[0].get("answer_chunks") or []
+        assert len(chunks) >= 1, "expected answer_key_chunks rows"
+        assert all(len(c.get("embedding") or []) == EMBEDDING_DIMS for c in chunks)
+        print(
+            f"[ok] list_answer_keys + answer_chunks ({len(chunks)} chunk(s), {len(emb)}-D aggregate)"
+        )
 
         questions = [
             {

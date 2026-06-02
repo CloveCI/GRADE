@@ -57,6 +57,36 @@ def test_section_marker_does_not_span_lines():
     assert "Second answer" in r.questions[1].expected_answer
 
 
+def test_multi_page_pdf_splits_into_q1_q2_when_no_numbered_sections():
+    pytest.importorskip("pypdf")
+    from io import BytesIO
+
+    from reportlab.pdfgen import canvas
+
+    buf = BytesIO()
+    c = canvas.Canvas(buf)
+    c.drawString(72, 720, "Page one model answer about stacks.")
+    c.showPage()
+    c.drawString(72, 720, "Page two model answer about disks.")
+    c.save()
+    r = pdf_bytes_to_upload_request(buf.getvalue(), "exam-pages", 4.0)
+    assert len(r.questions) == 2
+    assert r.questions[0].question_id == "Q1"
+    assert r.questions[1].question_id == "Q2"
+    assert "stacks" in r.questions[0].expected_answer.lower()
+    assert "disks" in r.questions[1].expected_answer.lower()
+
+
+def test_duplicate_section_numbers_renumbered():
+    raw = "1. First answer.\n\n1. Second answer.\n\n1. Third answer.\n"
+    r = text_to_upload_request(raw, "exam-dup", 4.0)
+    assert len(r.questions) == 3
+    assert [q.question_id for q in r.questions] == ["Q1", "Q2", "Q3"]
+    assert "First" in r.questions[0].expected_answer
+    assert "Second" in r.questions[1].expected_answer
+    assert "Third" in r.questions[2].expected_answer
+
+
 def test_pdf_via_reportlab_extracts_sections():
     pytest.importorskip("reportlab")
     pytest.importorskip("pypdf")

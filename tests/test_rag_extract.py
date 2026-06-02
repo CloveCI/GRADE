@@ -3,6 +3,7 @@
 from autograder.rag_extract import (
     build_rag_payload,
     chunk_text,
+    max_embed_text_length,
     normalize_ocr_text,
 )
 
@@ -36,7 +37,8 @@ def test_build_rag_payload_has_chunks():
         chunk_size=100,
         chunk_overlap=20,
     )
-    assert p["schema_version"] == "1.0"
+    assert p["schema_version"] == "1.1"
+    assert p["chunking"]["max_embed_length"] == max_embed_text_length()
     assert "full_text" in p
     assert len(p["chunks"]) >= 1
     assert p["chunks"][0]["metadata"]["region_id"] == "R1"

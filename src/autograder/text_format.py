@@ -116,6 +116,20 @@ def _heuristic_format(text: str, vocab: Set[str]) -> str:
     return normalize_ocr_text(t)
 
 
+def _format_with_openrouter(raw: str, key: Dict[str, Any]) -> str:
+    from autograder.llm_providers import build_ocr_format_prompt, openrouter_chat
+
+    vocab_hint = ", ".join(sorted(_key_vocabulary(key)))[:500]
+    prompt = build_ocr_format_prompt(raw, key, vocab_hint)
+    return normalize_ocr_text(
+        openrouter_chat(
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.0,
+            max_tokens=2048,
+        )
+    )
+
+
 def _format_with_gemini(
     raw: str,
     key: Dict[str, Any],
@@ -195,28 +209,51 @@ def format_student_answer(
             flags=flags,
         )
 
-    api_key = os.environ.get("GRADE_GEMINI_API_KEY") or os.environ.get("GEMINI_API_KEY")
-    if not api_key:
-        flags.append("ocr_format_llm_skipped")
-        return FormattedOcrText(raw=raw, formatted=heuristic or raw, method="heuristic", flags=flags)
+    from autograder.llm_providers import (
+        gemini_api_key,
+        gemini_model,
+        openrouter_fallback_enabled,
+    )
 
-    model_id = os.environ.get("GRADE_LLM_MODEL", "gemini-2.0-flash")
-    try:
-        llm_out = _format_with_gemini(heuristic or raw, key, model_id=model_id, api_key=api_key)
-        if llm_out and llm_out != heuristic:
-            flags.append("ocr_llm_fix")
+    api_key = gemini_api_key()
+    model_id = gemini_model()
+    llm_out: Optional[str] = None
+    method = "heuristic"
+
+    if api_key:
+        try:
+            llm_out = _format_with_gemini(heuristic or raw, key, model_id=model_id, api_key=api_key)
+            method = "llm"
+            flags.append("ocr_gemini_format")
+        except Exception as exc:
+            logger.warning("OCR format Gemini failed: %s", exc)
+            flags.append("ocr_format_gemini_failed")
+
+    if (not llm_out or method == "heuristic") and openrouter_fallback_enabled():
+        try:
+            llm_out = _format_with_openrouter(heuristic or raw, key)
+            method = "llm"
+            flags.append("ocr_openrouter_format")
+        except Exception as exc:
+            logger.warning("OCR format OpenRouter failed: %s", exc)
+            flags.append("ocr_format_openrouter_failed")
+
+    if llm_out and llm_out != heuristic:
+        flags.append("ocr_llm_fix")
+    if llm_out:
         return FormattedOcrText(
             raw=raw,
-            formatted=llm_out or heuristic or raw,
-            method="llm",
+            formatted=llm_out,
+            method=method,
             flags=flags,
         )
-    except Exception as exc:
-        logger.warning("OCR format LLM failed, using heuristic only: %s", exc)
-        flags.append("ocr_format_llm_failed")
-        return FormattedOcrText(
-            raw=raw,
-            formatted=heuristic or raw,
-            method="heuristic",
-            flags=flags,
-        )
+
+    if not api_key and not openrouter_fallback_enabled():
+        flags.append("ocr_format_llm_skipped")
+    flags.append("ocr_format_llm_failed")
+    return FormattedOcrText(
+        raw=raw,
+        formatted=heuristic or raw,
+        method="heuristic",
+        flags=flags,
+    )

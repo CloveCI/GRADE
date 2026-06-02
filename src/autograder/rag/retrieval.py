@@ -28,6 +28,10 @@ def match_answer_key(
     if not keys:
         raise ValueError("keys cannot be empty")
 
+    qids = [str(k.get("question_id") or "") for k in keys]
+    if len(qids) != len(set(qids)):
+        return keys[min(region_index, len(keys) - 1)]
+
     top = retrieve_top_k(student_text, keys, top_k=top_k)
     if top:
         emb_key, sim = top[0]

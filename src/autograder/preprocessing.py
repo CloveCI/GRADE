@@ -12,7 +12,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Tuple, Union
+from typing import Any, List, Tuple, Union
 
 import cv2
 import numpy as np
@@ -433,5 +433,94 @@ def preprocess_pipeline(
             and Path(image_input).suffix.lower() == ".pdf"
             else None,
             "full_page": full_page,
+        },
+    )
+
+
+def pdf_page_count(image_input: Union[str, Path]) -> int:
+    """Number of pages in a PDF, or 1 for raster images."""
+    path = Path(image_input)
+    if path.suffix.lower() != ".pdf":
+        return 1
+    try:
+        import fitz  # PyMuPDF
+    except ImportError as e:
+        raise RuntimeError("PDF sheets require pymupdf (pip install pymupdf)") from e
+    doc = fitz.open(str(path))
+    try:
+        return max(1, len(doc))
+    finally:
+        doc.close()
+
+
+def preprocess_sheet_for_evaluation(
+    image_input: Union[str, Path],
+    *,
+    num_answer_keys: int = 0,
+    expected_num_regions: int | None = None,
+    **pipeline_kwargs: Any,
+) -> PreprocessResult:
+    """
+    Collect OCR patches for an answer sheet (all PDF pages).
+
+    When ``num_answer_keys`` equals PDF page count, uses one full-page region per page
+    so patch 1 lines up with key Q1, etc. Otherwise uses ``expected_num_regions`` or
+    ``num_answer_keys`` on single-page sheets.
+    """
+    path = Path(image_input)
+    pages = pdf_page_count(path)
+
+    if pages == 1:
+        exp = expected_num_regions
+        if exp is None and num_answer_keys > 0:
+            exp = num_answer_keys
+        return preprocess_pipeline(
+            image_input,
+            expected_num_regions=exp,
+            **pipeline_kwargs,
+        )
+
+    one_per_page = num_answer_keys > 0 and pages == num_answer_keys
+    # Multi-page sheets: default to one full-page OCR region per page (matches sheet RAG ingest).
+    default_full_page_per_pdf_page = pages > 1 and expected_num_regions is None
+    all_patches: List[np.ndarray] = []
+    all_bboxes: List[Tuple[int, int, int, int]] = []
+    all_region_ids: List[str] = []
+    used_fallback = False
+    page_meta: List[dict] = []
+
+    for page_idx in range(pages):
+        kw = dict(pipeline_kwargs)
+        if one_per_page or default_full_page_per_pdf_page:
+            kw["full_page"] = True
+            page_expected: int | None = 1
+        else:
+            page_expected = expected_num_regions
+        pp = preprocess_pipeline(
+            image_input,
+            expected_num_regions=page_expected,
+            pdf_page_index=page_idx,
+            **kw,
+        )
+        used_fallback = used_fallback or pp.used_fallback_grid
+        page_meta.append({"page": page_idx + 1, "regions": len(pp.patches)})
+        for i, rid in enumerate(pp.region_ids):
+            prefix = f"P{page_idx + 1}_"
+            all_region_ids.append(f"{prefix}{rid}" if not rid.startswith("P") else rid)
+            all_patches.append(pp.patches[i])
+            all_bboxes.append(pp.bboxes[i])
+
+    return PreprocessResult(
+        patches=all_patches,
+        bboxes=all_bboxes,
+        region_ids=all_region_ids,
+        used_fallback_grid=used_fallback,
+        diagnostics={
+            "num_regions": len(all_patches),
+            "pdf_pages": pages,
+            "one_region_per_page": one_per_page or default_full_page_per_pdf_page,
+            "num_answer_keys": num_answer_keys,
+            "expected_num_regions": expected_num_regions,
+            "pages": page_meta,
         },
     )

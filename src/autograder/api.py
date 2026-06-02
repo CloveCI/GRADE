@@ -21,6 +21,8 @@ from fastapi.responses import FileResponse, Response
 
 from autograder.db import (
     database_status,
+    delete_answer_keys_for_exam,
+    delete_rag_chunks_for_document,
     get_rag_chunks_for_sheet,
     get_result,
     get_sheet,
@@ -36,7 +38,7 @@ from autograder.db import (
     next_answer_key_sort_order_start,
 )
 from autograder.embeddings import embed_text_local
-from autograder.rag.ingest import ingest_keys_rag, ingest_sheet_rag, sync_exam_ingest
+from autograder.rag.ingest import ingest_keys_rag, ingest_sheet_rag, keys_document_id, sync_exam_ingest
 from autograder.rag.retrieval import (
     hybrid_search_for_exam,
     hybrid_search_for_sheet,
@@ -50,7 +52,11 @@ from autograder.ocr import (
     ocr_patch,
     ocr_patch_consensus,
 )
-from autograder.preprocessing import PATCH_SIZE, preprocess_pipeline
+from autograder.preprocessing import (
+    PATCH_SIZE,
+    preprocess_pipeline,
+    preprocess_sheet_for_evaluation,
+)
 from autograder.report_pdf import build_evaluation_pdf
 from autograder.scoring import prompt_hash, score_answer_llm
 from autograder.text_format import format_student_answer
@@ -58,6 +64,7 @@ from autograder.schemas import (
     EvaluateRequest,
     EvaluateResponse,
     QuestionResult,
+    RubricScores,
     RubricBreakdownResponse,
     UploadExamBundleResponse,
     UploadKeyRequest,
@@ -219,30 +226,6 @@ def _cors_origins() -> List[str]:
     return [o.strip() for o in raw.split(",") if o.strip()]
 
 
-def _probe_gemini_live() -> Dict[str, Any]:
-    """One-token live call to verify the API key and Generative Language API access."""
-    api_key = (
-        os.environ.get("GRADE_GEMINI_API_KEY", "").strip()
-        or os.environ.get("GEMINI_API_KEY", "").strip()
-    )
-    model_id = os.environ.get("GRADE_LLM_MODEL", "gemini-2.0-flash")
-    if not api_key:
-        return {"ok": False, "model": model_id, "error": "no_api_key"}
-    try:
-        import google.generativeai as genai
-
-        genai.configure(api_key=api_key)
-        gm = genai.GenerativeModel(model_id)
-        resp = gm.generate_content(
-            "Reply with exactly: OK",
-            generation_config=genai.GenerationConfig(temperature=0.0),
-        )
-        text = (resp.text or "").strip()
-        return {"ok": bool(text), "model": model_id, "reply": text[:80]}
-    except Exception as exc:
-        return {"ok": False, "model": model_id, "error": str(exc)[:500]}
-
-
 def _require_database(*, need_rag: bool = False, need_evaluation: bool = False) -> Dict[str, Any]:
     """Raise 503 when Postgres is not reachable or required tables are missing."""
     st = database_status()
@@ -357,12 +340,9 @@ def integrations_status():
         import fitz  # noqa: F401  # PyMuPDF
     except ImportError:
         pymupdf_ok = False
-    llm_flag = os.environ.get("GRADE_ENABLE_LLM", "").lower() in {"1", "true", "yes"}
-    gem_key = bool(
-        os.environ.get("GRADE_GEMINI_API_KEY", "").strip()
-        or os.environ.get("GEMINI_API_KEY", "").strip()
-    )
-    gem_probe = _probe_gemini_live() if llm_flag and gem_key else None
+    from autograder.llm_providers import llm_status
+
+    llm = llm_status()
     db = database_status()
 
     gcv_installed = True
@@ -399,12 +379,9 @@ def integrations_status():
             "GRADE_OCR_GOOGLE_ONLY": ocr_google_only,
             "ready_google_vision": gcv_installed and g_vision_cfg,
         },
-        "llm_gemini": {
-            "GRADE_ENABLE_LLM": llm_flag,
-            "api_key_present": gem_key,
-            "ready": llm_flag and gem_key and bool(gem_probe and gem_probe.get("ok")),
-            "live_probe": gem_probe,
-        },
+        "llm": llm,
+        "llm_gemini": llm.get("llm_gemini"),
+        "llm_openrouter": llm.get("llm_openrouter"),
         "phase_3_db": {
             "module": "autograder.db",
             "backend": "postgres",
@@ -441,12 +418,11 @@ def upload_key(payload: UploadKeyRequest):
     sort_base = next_answer_key_sort_order_start(payload.exam_id)
     key_ids: List[str] = []
     for i, q in enumerate(payload.questions):
-        embedding = embed_text_local(q.expected_answer)
         key_id = insert_answer_key(
             exam_id=payload.exam_id,
             question_id=q.question_id,
             expected_answer=q.expected_answer,
-            embedding=embedding,
+            embedding=None,
             max_marks=q.max_marks,
             domain=q.domain,
             rubric_override=q.rubric_override,
@@ -497,6 +473,11 @@ async def upload_exam_bundle(
             status_code=400,
             detail=f"Key file exam_id ({payload.exam_id}) does not match form exam_id ({ex})",
         )
+
+    deleted = delete_answer_keys_for_exam(ex)
+    delete_rag_chunks_for_document(keys_document_id(ex))
+    if deleted:
+        logger.info("Replaced %s existing answer key row(s) for exam_id=%s", deleted, ex)
 
     key_resp = upload_key(payload)
     sheet_bytes = await sheet_file.read()
@@ -734,8 +715,9 @@ def evaluate(req: EvaluateRequest):
         raise HTTPException(status_code=404, detail="No answer keys found for exam_id")
 
     try:
-        pp = preprocess_pipeline(
+        pp = preprocess_sheet_for_evaluation(
             sheet["path"],
+            num_answer_keys=len(keys),
             expected_num_regions=req.expected_num_regions,
             **_preprocess_options_from_env(),
         )
@@ -762,8 +744,32 @@ def evaluate(req: EvaluateRequest):
             )
             ocr_engines.append(ocr_res.engine)
 
-            chosen = match_answer_key(idx, ocr_res.text, keys, top_k=req.top_k)
-            formatted = format_student_answer(ocr_res.text, chosen)
+            raw_ocr = (ocr_res.text or "").strip()
+            if not raw_ocr:
+                q_results.append(
+                    QuestionResult(
+                        question_id=keys[min(idx, len(keys) - 1)]["question_id"],
+                        region_index=idx,
+                        student_answer="",
+                        ocr_raw="",
+                        awarded_marks=0.0,
+                        max_marks=float(keys[min(idx, len(keys) - 1)]["max_marks"]),
+                        rubric_scores=RubricScores(
+                            factual_accuracy=0,
+                            conceptual_completeness=0,
+                            reasoning=0,
+                            domain_terminology=0,
+                        ),
+                        feedback="No OCR text detected for this answer region.",
+                        grading_confidence="low",
+                        ocr_confidence=float(ocr_res.confidence),
+                        flags=list(ocr_res.flags or []) + ["ocr_empty", "review_required"],
+                    )
+                )
+                continue
+
+            chosen = match_answer_key(idx, raw_ocr, keys, top_k=req.top_k)
+            formatted = format_student_answer(raw_ocr, chosen)
             student_text = formatted.formatted
 
             rag_ctx = retrieve_context_for_grading(

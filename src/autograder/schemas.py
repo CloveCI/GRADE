@@ -5,12 +5,34 @@ from typing import Dict, List, Optional
 from pydantic import BaseModel, Field, field_validator
 
 
+class AnswerKeyChunkOut(BaseModel):
+    chunk_id: str
+    chunk_index: int
+    text_content: str
+    embedding: List[float] = Field(default_factory=list)
+    char_start: Optional[int] = None
+    char_end: Optional[int] = None
+
+
 class AnswerKeyItemIn(BaseModel):
     question_id: str
     expected_answer: str
     max_marks: float = Field(gt=0)
     domain: str = "general"
     rubric_override: Optional[dict] = None
+
+
+class AnswerKeyOut(BaseModel):
+    id: str
+    exam_id: str
+    question_id: str
+    expected_answer: str
+    embedding: List[float] = Field(default_factory=list)
+    max_marks: float
+    domain: str = "general"
+    rubric_override: Optional[dict] = None
+    sort_order: int = 0
+    answer_chunks: List[AnswerKeyChunkOut] = Field(default_factory=list)
 
 
 class UploadKeyRequest(BaseModel):

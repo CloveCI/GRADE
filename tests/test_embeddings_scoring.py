@@ -108,6 +108,8 @@ class TestScoreAnswerLlmEnv:
         monkeypatch.setenv("GRADE_ENABLE_LLM", "true")
         monkeypatch.delenv("GRADE_GEMINI_API_KEY", raising=False)
         monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+        monkeypatch.delenv("GRADE_OPENROUTER_API_KEY", raising=False)
+        monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
         monkeypatch.delenv("GRADE_LLM_MOCK_RESPONSE", raising=False)
         res, _ = score_answer_llm(
             student_answer="answer",
@@ -117,5 +119,46 @@ class TestScoreAnswerLlmEnv:
             subject_domain="general",
             ocr_confidence=0.8,
         )
-        assert "gemini_key_missing" in res.flags
-        assert "Gemini API key" in res.feedback
+        assert "llm_unavailable" in res.flags
+
+    def test_openrouter_fallback_when_gemini_fails(self, monkeypatch):
+        monkeypatch.setenv("GRADE_ENABLE_LLM", "true")
+        monkeypatch.setenv("GRADE_GEMINI_API_KEY", "fake-gemini")
+        monkeypatch.setenv("GRADE_OPENROUTER_API_KEY", "fake-or")
+        monkeypatch.delenv("GRADE_LLM_MOCK_RESPONSE", raising=False)
+
+        def _fail_gemini(**_kwargs):
+            raise RuntimeError("429 quota")
+
+        mock_payload = {
+            "awarded_marks": 3.5,
+            "rubric_scores": {
+                "factual_accuracy": 3,
+                "conceptual_completeness": 3,
+                "reasoning": 3,
+                "domain_terminology": 3,
+            },
+            "feedback": "openrouter graded",
+            "grading_confidence": "high",
+            "flags": [],
+        }
+
+        monkeypatch.setattr("autograder.scoring._score_with_gemini", _fail_gemini)
+        monkeypatch.setattr(
+            "autograder.scoring._score_with_openrouter",
+            lambda **_: __import__(
+                "autograder.scoring", fromlist=["_from_json_payload"]
+            )._from_json_payload(mock_payload, 5.0),
+        )
+
+        res, label = score_answer_llm(
+            student_answer="student text",
+            model_answer="model text",
+            max_marks=5.0,
+            question_text="Q1",
+            subject_domain="general",
+            ocr_confidence=0.8,
+        )
+        assert res.awarded_marks == 3.5
+        assert "openrouter_ok" in res.flags
+        assert label.startswith("openrouter:")

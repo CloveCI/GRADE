@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { AlertCircle, Database, Sparkles, Layers, ClipboardCheck, CircleCheck, CircleX } from "lucide-react";
+import { AlertCircle, Database, Sparkles, Layers, ClipboardCheck, CircleCheck, CircleX, Route } from "lucide-react";
 import { getDatabaseStatus, getIntegrations, type DatabaseStatus, type IntegrationsStatus } from "@/lib/api";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
@@ -58,7 +58,11 @@ export function SystemStatusPanel({ variant = "full" }: Props) {
       <Pill ok={!!db?.connected} icon={Database} label="Postgres" />
       <Pill ok={!!db?.rag_ready && !!db?.pgvector_extension} icon={Layers} label="RAG (pgvector)" />
       <Pill ok={!!db?.evaluation_ready} icon={ClipboardCheck} label="Evaluations" />
+      <Pill ok={!!integ?.llm?.ready} icon={Sparkles} label="LLM" />
       <Pill ok={!!integ?.llm_gemini?.ready} icon={Sparkles} label="Gemini" />
+      {integ?.llm_openrouter?.api_key_present && (
+        <Pill ok={!!integ?.llm_openrouter?.ready} icon={Route} label="OpenRouter" />
+      )}
     </div>
   );
 
@@ -122,10 +126,33 @@ PYTHONPATH=src uvicorn autograder.api:app --host 127.0.0.1 --port 8000`}
             sub={`${db?.counts?.answer_keys ?? 0} keys · ${db?.counts?.sheets ?? 0} sheets`}
           />
         </div>
-        {!integ?.llm_gemini?.ready && (
+        {!integ?.llm?.ready && (
           <div className="rounded-lg border border-warning/40 bg-warning/5 p-3 text-xs text-warning">
-            Gemini is off. In repo root <code>.env</code> set <code>GRADE_ENABLE_LLM=true</code> and{" "}
-            <code>GRADE_GEMINI_API_KEY=…</code>, then restart uvicorn.
+            {integ?.llm_gemini?.api_key_present || integ?.llm_openrouter?.api_key_present ? (
+              <>
+                LLM not ready
+                {integ.llm_gemini?.live_probe?.model ? ` (Gemini: ${integ.llm_gemini.live_probe.model})` : ""}
+                {integ.llm_openrouter?.model ? ` (OpenRouter: ${integ.llm_openrouter.model})` : ""}.
+                {integ.llm_gemini?.live_probe?.error?.includes("429") ||
+                integ.llm_gemini?.live_probe?.error?.includes("quota") ? (
+                  <> Gemini rate limited — OpenRouter fallback applies if configured and probed OK. Wait and refresh, or set{" "}
+                    <code>GRADE_OPENROUTER_API_KEY</code> from{" "}
+                    <a href="https://openrouter.ai/keys" target="_blank" rel="noreferrer" className="underline">
+                      openrouter.ai
+                    </a>
+                    .</>
+                ) : integ.llm_openrouter?.api_key_present && !integ.llm_openrouter?.ready ? (
+                  <> Check OpenRouter key and model <code>{integ.llm_openrouter.model}</code>.</>
+                ) : (
+                  <> Set <code>GRADE_GEMINI_API_KEY</code> and/or <code>GRADE_OPENROUTER_API_KEY</code>, then restart uvicorn.</>
+                )}
+              </>
+            ) : (
+              <>
+                Gemini is off. In repo root <code>.env</code> set <code>GRADE_ENABLE_LLM=true</code> and{" "}
+                <code>GRADE_GEMINI_API_KEY=…</code>, then restart uvicorn.
+              </>
+            )}
           </div>
         )}
         {db?.error && (

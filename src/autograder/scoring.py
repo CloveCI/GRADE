@@ -6,9 +6,18 @@ import logging
 import os
 import re
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from autograder.embeddings import cosine_similarity, embed_text_local
+from autograder.llm_providers import (
+    build_grading_user_prompt,
+    gemini_api_key,
+    gemini_model,
+    grading_system_prompt,
+    openrouter_chat,
+    openrouter_fallback_enabled,
+    openrouter_model,
+)
 from autograder.schemas import EvaluationResult, RubricScores
 
 logger = logging.getLogger(__name__)
@@ -26,7 +35,6 @@ def _legacy_fallback_score(student_answer: str, model_answer: str, max_marks: fl
     m_vec = embed_text_local(model_answer)
     sim = max(0.0, cosine_similarity(s_vec, m_vec))
     awarded = round(sim * max_marks, 1)
-    # map similarity into 0..4 buckets for rubric compatibility
     rub = int(round(min(4.0, sim * 4.0)))
     return EvaluationResult(
         awarded_marks=awarded,
@@ -44,7 +52,6 @@ def _legacy_fallback_score(student_answer: str, model_answer: str, max_marks: fl
 
 
 def _from_json_payload(payload: Dict[str, Any], max_marks: float) -> EvaluationResult:
-    # Clamp in case upstream returns slight overflow.
     payload = dict(payload)
     payload["max_marks"] = max_marks
     payload["awarded_marks"] = min(max(0.0, float(payload.get("awarded_marks", 0.0))), max_marks)
@@ -62,35 +69,25 @@ def _from_json_payload(payload: Dict[str, Any], max_marks: float) -> EvaluationR
     return EvaluationResult.model_validate(payload)
 
 
-def _gemini_api_key() -> Optional[str]:
-    return os.environ.get("GRADE_GEMINI_API_KEY") or os.environ.get("GEMINI_API_KEY")
-
-
-def _gemini_error_hint(exc: Exception) -> str:
-    """Short, actionable message for UI/logs (not full gRPC metadata)."""
-    msg = str(exc)
-    if "API_KEY_SERVICE_BLOCKED" in msg:
-        return (
-            "Gemini API key is blocked from Generative Language API (API_KEY_SERVICE_BLOCKED). "
-            "Use a key from https://aistudio.google.com/apikey, or in Google Cloud Console → "
-            "Credentials → your key → API restrictions: add “Generative Language API” or set "
-            "“Don’t restrict key”. Restart uvicorn after updating GRADE_GEMINI_API_KEY in .env."
-        )
-    if "SERVICE_DISABLED" in msg:
-        return (
-            "Generative Language API is disabled for GCP project linked to this key. Enable it: "
-            "https://console.cloud.google.com/apis/library/generativelanguage.googleapis.com"
-        )
-    line = msg.replace("\n", " ").strip()
-    return f"Gemini error: {line[:240]}"
-
-
 def _parse_llm_json_text(text: str) -> Dict[str, Any]:
     text = text.strip()
     m = re.search(r"```(?:json)?\s*([\s\S]*?)```", text)
     if m:
         text = m.group(1).strip()
     return json.loads(text)
+
+
+def _provider_error_hint(provider: str, exc: Exception) -> str:
+    msg = str(exc)
+    if provider == "gemini" and "API_KEY_SERVICE_BLOCKED" in msg:
+        return (
+            "Gemini API key is blocked (API_KEY_SERVICE_BLOCKED). "
+            "Fix key restrictions or rely on OpenRouter fallback."
+        )
+    if "429" in msg or "quota" in msg.lower():
+        return f"{provider} rate limit / quota exceeded; OpenRouter fallback may apply."
+    line = msg.replace("\n", " ").strip()
+    return f"{provider} error: {line[:200]}"
 
 
 def _score_with_gemini(
@@ -109,34 +106,17 @@ def _score_with_gemini(
     import google.generativeai as genai
 
     genai.configure(api_key=api_key)
-    role = PROMPT_PATH.read_text(encoding="utf-8") if PROMPT_PATH.exists() else ""
-    payload_hint = (
-        "Return ONLY JSON with keys: "
-        "awarded_marks (number), rubric_scores (object with factual_accuracy, "
-        "conceptual_completeness, reasoning, domain_terminology — each integer 0–4), "
-        "feedback (string), grading_confidence (exactly one of: high, medium, low), "
-        "flags (array of strings). "
-        "Do not include max_marks."
+    role = grading_system_prompt()
+    user = build_grading_user_prompt(
+        question_text=question_text,
+        subject_domain=subject_domain,
+        max_marks=max_marks,
+        ocr_confidence=ocr_confidence,
+        model_answer=model_answer,
+        student_answer=student_answer,
+        rag_context=rag_context,
+        rubric_override=rubric_override,
     )
-    grounding = rag_context if rag_context else (
-        f"=== KEY SIDE — Question {question_text} ===\n"
-        f"Official model answer: {model_answer}\n\n"
-        f"=== STUDENT SIDE — Question {question_text} ===\n"
-        f"OCR text: {student_answer}\n"
-        "(No RAG excerpts retrieved.)"
-    )
-    user = f"""{payload_hint}
-
-Question ID: {question_text}
-Subject domain: {subject_domain}
-Max marks for this question: {max_marks}
-OCR confidence (0–1): {ocr_confidence:.2f}
-
-Evidence (use ONLY this block; compare KEY SIDE vs STUDENT SIDE semantically):
-{grounding}
-
-Rubric override (JSON, or null): {json.dumps(rubric_override) if rubric_override else "null"}
-"""
     full_prompt = f"{role}\n\n{user}"
     gm = genai.GenerativeModel(model_id)
     resp = gm.generate_content(
@@ -149,8 +129,40 @@ Rubric override (JSON, or null): {json.dumps(rubric_override) if rubric_override
     raw = (resp.text or "").strip()
     if not raw:
         raise RuntimeError("Gemini returned empty response")
-    data = _parse_llm_json_text(raw)
-    return _from_json_payload(data, max_marks)
+    return _from_json_payload(_parse_llm_json_text(raw), max_marks)
+
+
+def _score_with_openrouter(
+    *,
+    student_answer: str,
+    model_answer: str,
+    max_marks: float,
+    question_text: str,
+    subject_domain: str,
+    ocr_confidence: float,
+    rubric_override: Optional[dict],
+    rag_context: Optional[str] = None,
+) -> EvaluationResult:
+    role = grading_system_prompt()
+    user = build_grading_user_prompt(
+        question_text=question_text,
+        subject_domain=subject_domain,
+        max_marks=max_marks,
+        ocr_confidence=ocr_confidence,
+        model_answer=model_answer,
+        student_answer=student_answer,
+        rag_context=rag_context,
+        rubric_override=rubric_override,
+    )
+    raw = openrouter_chat(
+        messages=[
+            {"role": "system", "content": role},
+            {"role": "user", "content": user},
+        ],
+        json_mode=True,
+        temperature=0.0,
+    )
+    return _from_json_payload(_parse_llm_json_text(raw), max_marks)
 
 
 def score_answer_llm(
@@ -165,19 +177,16 @@ def score_answer_llm(
     rag_context: Optional[str] = None,
 ) -> tuple[EvaluationResult, str]:
     """
-    Return (EvaluationResult, llm_model).
+    Return (EvaluationResult, llm_model label).
 
-    If no LLM runtime is configured, fallback scorer is used.
-    LLM integration point is environment-driven to keep repo runnable offline.
+    Order: mock env → Gemini → OpenRouter (if enabled) → embedding fallback.
     """
     llm_on = os.environ.get("GRADE_ENABLE_LLM", "").lower() in {"1", "true", "yes"}
     if not llm_on:
-        label = os.environ.get("GRADE_LLM_MODEL", "fallback-legacy")
-        return _legacy_fallback_score(student_answer, model_answer, max_marks), label
+        return _legacy_fallback_score(student_answer, model_answer, max_marks), "fallback-legacy"
 
-    model_name = os.environ.get("GRADE_LLM_MODEL", "gemini-2.0-flash")
+    model_name = gemini_model()
 
-    # Optional runtime hook: external script writes JSON to env var for deterministic testing.
     raw_json = os.environ.get("GRADE_LLM_MOCK_RESPONSE")
     if raw_json:
         try:
@@ -186,7 +195,8 @@ def score_answer_llm(
         except Exception:
             return _legacy_fallback_score(student_answer, model_answer, max_marks), model_name
 
-    gkey = _gemini_api_key()
+    last_error: Optional[Exception] = None
+    gkey = gemini_api_key()
     if gkey:
         try:
             res = _score_with_gemini(
@@ -204,32 +214,47 @@ def score_answer_llm(
             flags = list(res.flags)
             if "gemini_ok" not in flags:
                 flags.append("gemini_ok")
-            res = res.model_copy(update={"flags": flags})
-            return res, model_name
+            return res.model_copy(update={"flags": flags}), model_name
         except Exception as exc:
-            logger.warning("Gemini grading failed, using embedding fallback: %s", exc)
-            fb = _legacy_fallback_score(student_answer, model_answer, max_marks)
-            merged_flags = list(dict.fromkeys(list(fb.flags) + ["gemini_error", "review_required"]))
-            fb = fb.model_copy(
-                update={
-                    "feedback": f"{fb.feedback} {_gemini_error_hint(exc)}",
-                    "flags": merged_flags,
-                }
-            )
-            return fb, model_name
+            last_error = exc
+            logger.warning("Gemini grading failed: %s", exc)
 
-    # LLM on but no Gemini key in process env (often .env not loaded — fix: restart API from repo or set GRADE_GEMINI_API_KEY).
+    if openrouter_fallback_enabled():
+        or_model = openrouter_model()
+        try:
+            res = _score_with_openrouter(
+                student_answer=student_answer,
+                model_answer=model_answer,
+                max_marks=max_marks,
+                question_text=question_text,
+                subject_domain=subject_domain,
+                ocr_confidence=ocr_confidence,
+                rubric_override=rubric_override,
+                rag_context=rag_context,
+            )
+            flags = list(res.flags)
+            flags.append("openrouter_ok")
+            if last_error:
+                flags.append("gemini_error")
+            return res.model_copy(update={"flags": flags}), f"openrouter:{or_model}"
+        except Exception as exc:
+            last_error = exc
+            logger.warning("OpenRouter grading failed: %s", exc)
+
     fb = _legacy_fallback_score(student_answer, model_answer, max_marks)
+    hints: List[str] = []
+    if last_error:
+        hints.append(_provider_error_hint("openrouter", last_error))
+    elif not gkey and not openrouter_fallback_enabled():
+        hints.append(
+            "Set GRADE_GEMINI_API_KEY and/or GRADE_OPENROUTER_API_KEY in .env and restart the API."
+        )
     fb = fb.model_copy(
         update={
-            "feedback": (
-                "LLM is enabled but no Gemini API key is set in the API process. "
-                "Set GRADE_GEMINI_API_KEY in the repo-root .env and restart uvicorn, or export the variable in the shell."
-            ),
+            "feedback": f"{fb.feedback} {' '.join(hints)}".strip(),
             "flags": list(
                 dict.fromkeys(
-                    [f for f in fb.flags if f != "llm_unavailable"]
-                    + ["gemini_key_missing", "review_required"]
+                    list(fb.flags) + ["gemini_error", "openrouter_error", "review_required"]
                 )
             ),
         }

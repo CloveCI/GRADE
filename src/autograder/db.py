@@ -233,7 +233,13 @@ def database_status() -> Dict[str, Any]:
 
     Used by ``/health``, ``/api/integrations``, and ``/api/database/status``.
     """
-    required_tables = ("answer_keys", "sheets", "rag_chunks", "evaluation_results")
+    required_tables = (
+        "answer_keys",
+        "answer_key_chunks",
+        "sheets",
+        "rag_chunks",
+        "evaluation_results",
+    )
     out: Dict[str, Any] = {
         "configured": False,
         "connected": False,
@@ -393,7 +399,7 @@ CREATE TABLE IF NOT EXISTS public.answer_keys (
 )
 """.strip(),
     "COMMENT ON TABLE public.answer_keys IS 'Model answers; sort_order preserves upload / sheet row order'",
-    "COMMENT ON COLUMN public.answer_keys.embedding IS '128-D from embed_text_local; change dimension only with a coordinated migration + re-embed'",
+    "COMMENT ON COLUMN public.answer_keys.embedding IS '128-D document vector; granular chunks in answer_key_chunks'",
     """
 CREATE INDEX IF NOT EXISTS idx_answer_keys_exam_sort
     ON public.answer_keys (exam_id, sort_order ASC, question_id ASC)
@@ -401,6 +407,29 @@ CREATE INDEX IF NOT EXISTS idx_answer_keys_exam_sort
     """
 CREATE INDEX IF NOT EXISTS idx_answer_keys_embedding_hnsw
     ON public.answer_keys
+    USING hnsw (embedding vector_cosine_ops)
+""".strip(),
+    """
+CREATE TABLE IF NOT EXISTS public.answer_key_chunks (
+    chunk_id TEXT PRIMARY KEY,
+    answer_key_id TEXT NOT NULL REFERENCES public.answer_keys (id) ON DELETE CASCADE,
+    chunk_index INTEGER NOT NULL,
+    text_content TEXT NOT NULL,
+    embedding vector(128) NOT NULL,
+    char_start INTEGER,
+    char_end INTEGER,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT uq_answer_key_chunks_key_index UNIQUE (answer_key_id, chunk_index)
+)
+""".strip(),
+    "COMMENT ON TABLE public.answer_key_chunks IS 'Chunked model-answer text + embeddings for granular retrieval'",
+    """
+CREATE INDEX IF NOT EXISTS idx_answer_key_chunks_key_id
+    ON public.answer_key_chunks (answer_key_id, chunk_index ASC)
+""".strip(),
+    """
+CREATE INDEX IF NOT EXISTS idx_answer_key_chunks_embedding_hnsw
+    ON public.answer_key_chunks
     USING hnsw (embedding vector_cosine_ops)
 """.strip(),
     """
@@ -549,18 +578,119 @@ def list_sheets(
     return out
 
 
+def upsert_answer_key_chunks(
+    answer_key_id: str,
+    chunks: List[Dict[str, Any]],
+) -> int:
+    """Replace all chunk rows for one answer key."""
+    if not chunks:
+        with _pg_connect(row_factory=dict_row) as conn:
+            with conn.cursor() as cur:
+                _pg_execute(
+                    cur,
+                    "DELETE FROM public.answer_key_chunks WHERE answer_key_id = %s",
+                    (answer_key_id,),
+                )
+            conn.commit()
+        return 0
+
+    _require_vector_deps()
+    with _pg_connect(row_factory=dict_row) as conn:
+        _register_pgvector(conn)
+        with conn.cursor() as cur:
+            _pg_execute(
+                cur,
+                "DELETE FROM public.answer_key_chunks WHERE answer_key_id = %s",
+                (answer_key_id,),
+            )
+            for ch in chunks:
+                _pg_execute(
+                    cur,
+                    """
+                    INSERT INTO public.answer_key_chunks (
+                        chunk_id, answer_key_id, chunk_index, text_content,
+                        embedding, char_start, char_end
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        ch["chunk_id"],
+                        answer_key_id,
+                        int(ch["chunk_index"]),
+                        ch["text_content"],
+                        Vector(ch["embedding"]),
+                        ch.get("char_start"),
+                        ch.get("char_end"),
+                    ),
+                )
+        conn.commit()
+    return len(chunks)
+
+
+def _attach_answer_chunks(keys: List[Dict[str, Any]]) -> None:
+    """Add ``answer_chunks`` list to each key dict (mutates in place)."""
+    if not keys:
+        return
+    ids = [str(k["id"]) for k in keys]
+    by_key: Dict[str, List[Dict[str, Any]]] = {kid: [] for kid in ids}
+    _require_vector_deps()
+    with _pg_connect(row_factory=dict_row) as conn:
+        _register_pgvector(conn)
+        with conn.cursor() as cur:
+            _pg_execute(
+                cur,
+                """
+                SELECT answer_key_id, chunk_id, chunk_index, text_content, embedding,
+                       char_start, char_end
+                FROM public.answer_key_chunks
+                WHERE answer_key_id = ANY(%s)
+                ORDER BY answer_key_id, chunk_index ASC
+                """,
+                (ids,),
+            )
+            for row in cur.fetchall():
+                item = dict(row)
+                emb = item.pop("embedding", None)
+                item["embedding"] = [float(x) for x in emb] if emb is not None else []
+                kid = str(item.pop("answer_key_id"))
+                by_key.setdefault(kid, []).append(item)
+    for k in keys:
+        k["answer_chunks"] = by_key.get(str(k["id"]), [])
+
+
 def insert_answer_key(
     exam_id: str,
     question_id: str,
     expected_answer: str,
-    embedding: List[float],
+    embedding: Optional[List[float]],
     max_marks: float,
     domain: str,
     rubric_override: Optional[dict],
     sort_order: int = 0,
+    *,
+    answer_chunks: Optional[List[Dict[str, Any]]] = None,
 ) -> str:
+    from autograder.key_chunks import aggregate_key_embedding, build_answer_key_chunks
+    from autograder.embeddings import embed_text
+
     _require_vector_deps()
     key_id = str(uuid.uuid4())
+    chunks = answer_chunks
+    if chunks is None:
+        chunks = build_answer_key_chunks(expected_answer, key_id=key_id)
+    if not chunks:
+        vec = embedding if embedding else embed_text(expected_answer)
+        chunks = [
+            {
+                "chunk_id": f"{key_id}_c0",
+                "chunk_index": 0,
+                "text_content": expected_answer.strip(),
+                "embedding": vec,
+                "char_start": 0,
+                "char_end": len(expected_answer.strip()),
+            }
+        ]
+    if not embedding:
+        embedding = aggregate_key_embedding(chunks) or embed_text(expected_answer)
     rub = Json(rubric_override) if rubric_override is not None else None
     with _pg_connect(row_factory=dict_row) as conn:
         _register_pgvector(conn)
@@ -584,7 +714,18 @@ def insert_answer_key(
                     sort_order,
                 ),
             )
+    upsert_answer_key_chunks(key_id, chunks)
     return key_id
+
+
+def delete_answer_keys_for_exam(exam_id: str) -> int:
+    """Remove all answer keys for an exam (used before bundle re-upload)."""
+    with _pg_connect(row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            _pg_execute(cur, "DELETE FROM public.answer_keys WHERE exam_id = %s", (exam_id,))
+            n = cur.rowcount or 0
+        conn.commit()
+    return n
 
 
 def list_answer_keys(exam_id: str) -> List[Dict[str, Any]]:
@@ -618,6 +759,11 @@ def list_answer_keys(exam_id: str) -> List[Dict[str, Any]]:
         if item.get("created_at") is not None:
             item["created_at"] = str(item["created_at"])
         out.append(item)
+    try:
+        _attach_answer_chunks(out)
+    except Exception:
+        for item in out:
+            item.setdefault("answer_chunks", [])
     return out
 
 

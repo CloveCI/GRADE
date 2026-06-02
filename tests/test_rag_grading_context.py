@@ -2,7 +2,19 @@
 
 from __future__ import annotations
 
-from autograder.rag.retrieval import format_grading_context, retrieve_context_for_grading
+from autograder.rag.retrieval import format_grading_context, match_answer_key, retrieve_context_for_grading
+
+
+def test_match_answer_key_uses_position_when_duplicate_question_ids():
+    keys = [
+        {"question_id": "Q1", "expected_answer": "alpha", "embedding": [1.0] + [0.0] * 127},
+        {"question_id": "Q1", "expected_answer": "beta", "embedding": [1.0] + [0.0] * 127},
+        {"question_id": "Q1", "expected_answer": "gamma", "embedding": [1.0] + [0.0] * 127},
+    ]
+    k0 = match_answer_key(0, "student text", keys, top_k=3)
+    k2 = match_answer_key(2, "student text", keys, top_k=3)
+    assert k0["expected_answer"] == "alpha"
+    assert k2["expected_answer"] == "gamma"
 
 
 def test_format_grading_context_side_by_side():

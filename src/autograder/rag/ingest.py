@@ -1,8 +1,7 @@
 """
 Ingest uploaded answer sheets into ``public.rag_chunks`` (GRADE 128-D + pgvector).
 
-Adapted from repo ``tasks/ingestion_tasks.py`` + ``processing/embedder.py`` patterns:
-chunk → embed → upsert, scoped per sheet via stable ``document_id``.
+Adapted from ``processing/embedder.py``: chunk → batch embed → upsert, scoped per sheet via ``document_id``.
 """
 
 from __future__ import annotations
@@ -19,7 +18,7 @@ from autograder.db import (
     list_answer_keys,
     upsert_rag_chunks_batch,
 )
-from autograder.embeddings import embed_text_local
+from autograder.embeddings import embed_texts_batch
 from autograder.ocr import ocr_patch
 from autograder.preprocessing import preprocess_pipeline
 from autograder.rag_extract import build_rag_payload, rag_rows_for_postgres
@@ -56,34 +55,64 @@ def ingest_keys_rag(exam_id: str, *, force: bool = True) -> Dict[str, Any]:
         delete_rag_chunks_for_document(document_id)
 
     rows: List[Dict[str, Any]] = []
+    rag_index = 0
     for k in keys:
         key_id = str(k["id"])
         qid = str(k.get("question_id") or "")
         expected = str(k.get("expected_answer") or "").strip()
         if not expected:
             continue
+        max_marks = float(k.get("max_marks") or 0)
+        sort_order = int(k.get("sort_order") or 0)
+        stored_chunks = k.get("answer_chunks") or []
+
+        if stored_chunks:
+            for ch in stored_chunks:
+                piece = str(ch.get("text_content") or "").strip()
+                emb = ch.get("embedding") or []
+                if not piece or not emb:
+                    continue
+                rows.append(
+                    {
+                        "chunk_id": f"key_{ch.get('chunk_id') or f'{key_id}_c{ch.get('chunk_index', 0)}'}",
+                        "document_id": document_id,
+                        "chunk_index": rag_index,
+                        "text_content": f"Question {qid}.\nModel answer excerpt: {piece}",
+                        "embedding": [float(x) for x in emb],
+                        "meta": {
+                            "kind": "answer_key",
+                            "exam_id": exam_id,
+                            "question_id": qid,
+                            "key_id": key_id,
+                            "max_marks": max_marks,
+                            "answer_chunk_index": int(ch.get("chunk_index") or 0),
+                        },
+                    }
+                )
+                rag_index += 1
+            continue
+
+        text = f"Question {qid}.\nModel answer: {expected}"
         emb = k.get("embedding") or []
         if not emb:
-            emb = embed_text_local(expected)
-        else:
-            emb = [float(x) for x in emb]
-        text = f"Question {qid}.\nModel answer: {expected}"
+            emb = embed_texts_batch([expected])[0]
         rows.append(
             {
                 "chunk_id": f"key_{key_id}",
                 "document_id": document_id,
-                "chunk_index": int(k.get("sort_order") or 0),
+                "chunk_index": rag_index,
                 "text_content": text,
-                "embedding": emb,
+                "embedding": [float(x) for x in emb],
                 "meta": {
                     "kind": "answer_key",
                     "exam_id": exam_id,
                     "question_id": qid,
                     "key_id": key_id,
-                    "max_marks": float(k.get("max_marks") or 0),
+                    "max_marks": max_marks,
                 },
             }
         )
+        rag_index += 1
 
     if not rows:
         return {"status": "skipped", "reason": "empty_keys", "exam_id": exam_id}
@@ -219,7 +248,7 @@ def ingest_sheet_rag(
         preprocess=preprocess_meta,
         document_id=document_id,
     )
-    rows = rag_rows_for_postgres(payload, embed_fn=embed_text_local)
+    rows = rag_rows_for_postgres(payload)
     for r in rows:
         meta = dict(r.get("meta") or {})
         meta["kind"] = "sheet"

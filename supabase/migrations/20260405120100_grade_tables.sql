@@ -34,7 +34,7 @@ CREATE TABLE IF NOT EXISTS public.answer_keys (
 );
 
 COMMENT ON TABLE public.answer_keys IS 'Model answers; sort_order preserves upload / sheet row order';
-COMMENT ON COLUMN public.answer_keys.embedding IS '128-D from embed_text_local; change dimension only with a coordinated migration + re-embed';
+COMMENT ON COLUMN public.answer_keys.embedding IS '128-D document-level vector (mean of answer_key_chunks); per-chunk vectors in answer_key_chunks';
 
 CREATE INDEX IF NOT EXISTS idx_answer_keys_exam_sort
     ON public.answer_keys (exam_id, sort_order ASC, question_id ASC);

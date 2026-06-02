@@ -22,6 +22,16 @@ def test_confidence_aggregation():
 
 
 def test_evaluate_pipeline_smoke(monkeypatch):
+    monkeypatch.setattr(
+        "autograder.api.database_status",
+        lambda: {
+            "configured": True,
+            "connected": True,
+            "schema_ready": True,
+            "rag_ready": True,
+            "evaluation_ready": True,
+        },
+    )
     # fake sheet and keys
     monkeypatch.setattr(
         "autograder.api.get_sheet",
@@ -37,6 +47,7 @@ def test_evaluate_pipeline_smoke(monkeypatch):
                 "domain": "general",
                 "rubric_override": None,
                 "embedding": [0.1] * 128,
+                "answer_chunks": [],
             },
             {
                 "question_id": "Q2",
@@ -45,6 +56,7 @@ def test_evaluate_pipeline_smoke(monkeypatch):
                 "domain": "general",
                 "rubric_override": None,
                 "embedding": [0.2] * 128,
+                "answer_chunks": [],
             },
         ],
     )
@@ -52,7 +64,7 @@ def test_evaluate_pipeline_smoke(monkeypatch):
     from autograder.preprocessing import PreprocessResult
 
     monkeypatch.setattr(
-        "autograder.api.preprocess_pipeline",
+        "autograder.api.preprocess_sheet_for_evaluation",
         lambda *args, **kwargs: PreprocessResult(
             patches=[np.zeros((384, 384), dtype=np.uint8), np.zeros((384, 384), dtype=np.uint8)],
             bboxes=[(0, 0, 10, 10), (0, 10, 10, 10)],

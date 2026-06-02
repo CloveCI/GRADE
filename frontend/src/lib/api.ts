@@ -81,7 +81,25 @@ export interface DatabaseStatus {
 }
 
 export interface IntegrationsStatus {
-  llm_gemini?: { ready?: boolean; GRADE_ENABLE_LLM?: boolean; api_key_present?: boolean };
+  llm?: {
+    ready?: boolean;
+    GRADE_ENABLE_LLM?: boolean;
+    primary?: string;
+    fallback?: string | null;
+  };
+  llm_gemini?: {
+    ready?: boolean;
+    GRADE_ENABLE_LLM?: boolean;
+    api_key_present?: boolean;
+    live_probe?: { ok?: boolean; model?: string; error?: string; reply?: string };
+  };
+  llm_openrouter?: {
+    ready?: boolean;
+    api_key_present?: boolean;
+    fallback_enabled?: boolean;
+    model?: string;
+    live_probe?: { ok?: boolean; model?: string; error?: string; reply?: string };
+  };
   rag_storage?: { ready?: boolean; chunk_count?: number };
   evaluation_storage?: { ready?: boolean; result_count?: number };
   phase_3_db?: DatabaseStatus & { ok?: boolean };

@@ -142,7 +142,41 @@ def text_to_upload_request(text: str, exam_id: str, default_max_marks: float = 4
                 max_marks=mx,
             )
         )
+    items = _ensure_unique_question_ids(items)
     return UploadKeyRequest(exam_id=exam_id, questions=items)
+
+
+def _ensure_unique_question_ids(items: List[AnswerKeyItemIn]) -> List[AnswerKeyItemIn]:
+    """
+    Scanned keys often repeat ``1.`` / ``Q1`` for every block; renumber to Q1..Qn in order.
+    """
+    if len(items) <= 1:
+        return items
+    ids = [it.question_id for it in items]
+    if len(set(ids)) == len(ids):
+        return items
+    logger.info(
+        "Duplicate question_id values %s; renumbering to Q1..Q%s by section order",
+        ids,
+        len(items),
+    )
+    return [it.model_copy(update={"question_id": f"Q{i + 1}"}) for i, it in enumerate(items)]
+
+
+def extract_text_per_pdf_page(data: bytes) -> List[str]:
+    """One text blob per PDF page (text layer or empty)."""
+    try:
+        from pypdf import PdfReader
+    except ImportError as e:
+        raise RuntimeError("Install PyPDF to use PDF answer keys: pip install pypdf") from e
+
+    reader = PdfReader(BytesIO(data))
+    if reader.is_encrypted:
+        try:
+            reader.decrypt("")
+        except Exception as exc:
+            raise ValueError("Encrypted PDFs are not supported; provide an unlocked key PDF.") from exc
+    return [(page.extract_text() or "").strip() for page in reader.pages]
 
 
 def pdf_bytes_to_upload_request(
@@ -150,14 +184,39 @@ def pdf_bytes_to_upload_request(
     exam_id: str,
     default_max_marks: float = 4.0,
 ) -> UploadKeyRequest:
-    raw = extract_text_from_pdf_bytes(data)
-    if not raw.strip():
+    page_texts = extract_text_per_pdf_page(data)
+    raw = "\n\n".join(t for t in page_texts if t).strip()
+    if not raw:
         logger.info("Key PDF has no text layer; attempting OCR fallback exam_id=%s", exam_id)
         try:
             raw = ocr_pdf_bytes_to_text(data)
+            page_texts = [raw] if raw.strip() else []
         except RuntimeError:
             raise
         except Exception as e:
             logger.warning("Key PDF OCR fallback failed: %s", e)
             raw = ""
-    return text_to_upload_request(raw, exam_id, default_max_marks)
+            page_texts = []
+
+    req = text_to_upload_request(raw, exam_id, default_max_marks)
+    if len(req.questions) == 1 and len([t for t in page_texts if t]) > 1:
+        items: List[AnswerKeyItemIn] = []
+        for i, text in enumerate(page_texts):
+            if not text.strip():
+                continue
+            body, mx = _parse_max_marks(text.strip(), default_max_marks)
+            items.append(
+                AnswerKeyItemIn(
+                    question_id=f"Q{len(items) + 1}",
+                    expected_answer=body,
+                    max_marks=mx,
+                )
+            )
+        if items:
+            logger.info(
+                "Key PDF split into %s page-based question(s) for exam_id=%s",
+                len(items),
+                exam_id,
+            )
+            return UploadKeyRequest(exam_id=exam_id, questions=items)
+    return req
