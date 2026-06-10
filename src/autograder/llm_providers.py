@@ -17,6 +17,7 @@ from typing import Any, Dict, List, Optional, Tuple
 logger = logging.getLogger(__name__)
 
 PROMPT_PATH = Path(__file__).parent / "prompts" / "grading_v2.txt"
+OCR_FORMAT_PROMPT_PATH = Path(__file__).parent / "prompts" / "ocr_format_v1.txt"
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 
@@ -104,24 +105,28 @@ Rubric override (JSON, or null): {json.dumps(rubric_override) if rubric_override
 """
 
 
+def ocr_format_system_prompt() -> str:
+    if OCR_FORMAT_PROMPT_PATH.is_file():
+        return OCR_FORMAT_PROMPT_PATH.read_text(encoding="utf-8").strip()
+    return (
+        "Fix handwritten exam OCR errors only. Output plain corrected student text. "
+        "Do not copy the reference answer."
+    )
+
+
 def build_ocr_format_prompt(raw: str, key: Dict[str, Any], vocab_hint: str) -> str:
     qid = str(key.get("question_id") or "")
     expected = str(key.get("expected_answer") or "").strip()
-    return f"""You fix handwritten exam OCR errors only.
+    prompt_part, _ = expected.split("\n\n", 1) if "\n\n" in expected else (expected, "")
+    system = ocr_format_system_prompt()
+    return f"""{system}
 
-Rules:
-- Output ONLY the corrected student handwriting as plain text (no JSON, no quotes).
-- Fix misspellings, broken words, and jumbled word order when clearly caused by OCR.
-- Do NOT copy sentences from the reference answer.
-- Do NOT add new facts or ideas the student did not attempt.
-- Preserve the student's meaning; if unsure, keep the original wording.
-- Use reference vocabulary only to spell domain terms correctly.
-
-Question: {qid}
-Reference answer (vocabulary hints only, NOT to copy): {expected[:800]}
+Question ID: {qid}
+Question stem: {prompt_part[:600]}
+Reference answer (vocabulary hints only — do NOT copy): {expected[:1200]}
 Domain terms: {vocab_hint or "(none)"}
 
-Raw OCR:
+Raw OCR (return the full corrected answer):
 {raw}
 
 Corrected student text:"""

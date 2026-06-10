@@ -8,6 +8,7 @@ from autograder.db import get_sheet, hybrid_search_rag_chunks, list_answer_keys
 from autograder.embeddings import embed_text_local, retrieve_top_k
 from autograder.rag.ingest import exam_rag_document_ids, keys_document_id, sheet_document_id
 from autograder.rag.query import process_query
+from autograder.rag.similarity import filter_hits_by_threshold
 
 _EMBED_MATCH_MIN = 0.28
 
@@ -97,10 +98,12 @@ def _sort_sheet_hits_for_region(
         meta = h.get("meta") or {}
         rid = str(meta.get("region_id") or "")
         region_match = 0 if (rid == token or token in rid) else 1
-        score = h.get("fused_score")
+        score = h.get("score")
         if score is None:
-            dist = float(h.get("distance") or 1.0)
-            score = 1.0 - dist
+            score = h.get("similarity")
+        if score is None:
+            dist = h.get("vector_distance", h.get("distance"))
+            score = 1.0 - float(dist or 1.0)
         return (region_match, -float(score))
 
     return sorted(hits, key=_rank)
@@ -296,14 +299,17 @@ def retrieve_context_for_grading(
 
     key_hits = hybrid_search_for_keys(exam_id, _key_corpus_query(key), top_k=per_corpus)
     key_hits = _hits_for_question(key_hits, qid, corpus="answer_key")
+    key_hits = filter_hits_by_threshold(key_hits, min_keep=1)
 
+    sheet_query = _sheet_corpus_query(student_text, key)
     sheet_hits = hybrid_search_rag_chunks(
-        _sheet_corpus_query(student_text, key),
-        embed_text_local(_sheet_corpus_query(student_text, key)),
+        sheet_query,
+        embed_text_local(sheet_query),
         top_k=per_corpus,
         document_id=sheet_document_id(sheet_id),
     )
     sheet_hits = _sort_sheet_hits_for_region(sheet_hits, region_index)
+    sheet_hits = filter_hits_by_threshold(sheet_hits, min_keep=1)
 
     # Combined hits for API/UI (explorer, debugging)
     all_hits = key_hits + sheet_hits

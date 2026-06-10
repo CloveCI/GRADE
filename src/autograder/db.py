@@ -1124,7 +1124,9 @@ def hybrid_search_rag_chunks(
         if not cid:
             continue
         scores[cid] = scores.get(cid, 0.0) + vector_weight / (k_rrf + rank + 1)
-        payload[cid] = h
+        row = dict(h)
+        row["vector_distance"] = float(h.get("distance") or 1.0)
+        payload[cid] = row
 
     bm_w = 1.0 - vector_weight
     for rank, h in enumerate(bm_hits):
@@ -1133,16 +1135,20 @@ def hybrid_search_rag_chunks(
             continue
         scores[cid] = scores.get(cid, 0.0) + bm_w / (k_rrf + rank + 1)
         if cid not in payload:
-            payload[cid] = h
+            row = dict(h)
+            row.setdefault("vector_distance", None)
+            payload[cid] = row
 
     ordered = sorted(scores.items(), key=lambda x: x[1], reverse=True)[:top_k]
-    out: List[Dict[str, Any]] = []
+    from autograder.rag.similarity import annotate_hits_with_similarity, filter_hits_by_threshold
+
+    fused_rows: List[Dict[str, Any]] = []
     for cid, fused in ordered:
         row = dict(payload[cid])
         row["fused_score"] = fused
-        row["distance"] = 1.0 - fused
-        out.append(row)
-    return out
+        fused_rows.append(row)
+    annotated = annotate_hits_with_similarity(fused_rows, embedding)
+    return filter_hits_by_threshold(annotated, min_keep=min(1, top_k))
 
 
 def search_rag_chunks(
@@ -1219,6 +1225,66 @@ def delete_rag_chunks_for_document(document_id: str) -> int:
             n = cur.rowcount or 0
         conn.commit()
     return n
+
+
+def list_rag_chunks_for_corpus(
+    document_id: str,
+    *,
+    question_id: Optional[str] = None,
+    key_id: Optional[str] = None,
+    region_id: Optional[str] = None,
+    sheet_id: Optional[str] = None,
+    limit: int = 500,
+) -> List[Dict[str, Any]]:
+    """
+    Fetch all ``rag_chunks`` for a document, optionally filtered by metadata scope.
+
+    Used to assemble complete per-question (key) or per-region (sheet) answers without
+    cross-boundary overlap.
+    """
+    limit = max(1, min(2000, int(limit)))
+    clauses = ["document_id = %s"]
+    params: List[Any] = [document_id]
+
+    if question_id:
+        clauses.append("COALESCE(meta->>'question_id', '') = %s")
+        params.append(str(question_id))
+    if key_id:
+        clauses.append("COALESCE(meta->>'key_id', '') = %s")
+        params.append(str(key_id))
+    if region_id:
+        clauses.append("COALESCE(meta->>'region_id', '') = %s")
+        params.append(str(region_id))
+    if sheet_id:
+        clauses.append("COALESCE(meta->>'sheet_id', '') = %s")
+        params.append(str(sheet_id))
+
+    where = " AND ".join(clauses)
+    params.append(limit)
+    with _pg_connect(row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            _pg_execute(
+                cur,
+                f"""
+                SELECT chunk_id, document_id, chunk_index, text_content, meta, created_at
+                FROM public.rag_chunks
+                WHERE {where}
+                ORDER BY chunk_index ASC
+                LIMIT %s
+                """,
+                tuple(params),
+            )
+            rows = cur.fetchall()
+    out: List[Dict[str, Any]] = []
+    for row in rows:
+        d = dict(row)
+        m = d.get("meta")
+        if isinstance(m, str):
+            d["meta"] = json.loads(m) if m else {}
+        if d.get("created_at") is not None:
+            d["created_at"] = str(d["created_at"])
+        out.append(d)
+    return out
 
 
 def get_rag_chunks_for_sheet(sheet_id: str, limit: int = 500) -> List[Dict[str, Any]]:

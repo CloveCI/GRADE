@@ -139,34 +139,17 @@ def _format_with_gemini(
 ) -> str:
     import google.generativeai as genai
 
-    qid = str(key.get("question_id") or "")
-    expected = str(key.get("expected_answer") or "").strip()
+    from autograder.llm_providers import build_ocr_format_prompt, ocr_format_system_prompt
+
     vocab_hint = ", ".join(sorted(_key_vocabulary(key)))[:500]
-
-    prompt = f"""You fix handwritten exam OCR errors only.
-
-Rules:
-- Output ONLY the corrected student handwriting as plain text (no JSON, no quotes).
-- Fix misspellings, broken words, and jumbled word order when clearly caused by OCR.
-- Do NOT copy sentences from the reference answer.
-- Do NOT add new facts or ideas the student did not attempt.
-- Preserve the student's meaning; if unsure, keep the original wording.
-- Use reference vocabulary only to spell domain terms correctly.
-
-Question: {qid}
-Reference answer (vocabulary hints only, NOT to copy): {expected[:800]}
-Domain terms: {vocab_hint or "(none)"}
-
-Raw OCR:
-{raw}
-
-Corrected student text:"""
+    user_prompt = build_ocr_format_prompt(raw, key, vocab_hint)
+    system = ocr_format_system_prompt()
 
     genai.configure(api_key=api_key)
-    gm = genai.GenerativeModel(model_id)
+    gm = genai.GenerativeModel(model_id, system_instruction=system)
     resp = gm.generate_content(
-        prompt,
-        generation_config=genai.GenerationConfig(temperature=0.0),
+        user_prompt,
+        generation_config=genai.GenerationConfig(temperature=0.0, max_output_tokens=4096),
     )
     out = (resp.text or "").strip()
     if not out:

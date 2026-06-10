@@ -164,6 +164,8 @@ def build_rag_payload(
                     "char_end": c1,
                     "metadata": {
                         "region_id": rid,
+                        "char_start": c0,
+                        "char_end": c1,
                         "ocr_engine": reg.get("ocr_engine"),
                         "ocr_confidence": reg.get("ocr_confidence"),
                         "source_page": page,

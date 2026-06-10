@@ -671,8 +671,13 @@ def api_rag_search(payload: Dict):
         hit_exam_id = (m or {}).get("exam_id")
         if exam_id and hit_exam_id and str(hit_exam_id) != exam_id:
             continue
-        fused = h.get("fused_score")
-        score = float(fused) if fused is not None else float(1.0 - float(h.get("distance") or 0.0))
+        score = float(
+            h.get("score")
+            if h.get("score") is not None
+            else h.get("similarity")
+            if h.get("similarity") is not None
+            else 1.0 - float(h.get("vector_distance", h.get("distance")) or 1.0)
+        )
         out.append(
             {
                 "chunk_id": h.get("chunk_id"),

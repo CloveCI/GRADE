@@ -86,6 +86,8 @@ def ingest_keys_rag(exam_id: str, *, force: bool = True) -> Dict[str, Any]:
                             "key_id": key_id,
                             "max_marks": max_marks,
                             "answer_chunk_index": int(ch.get("chunk_index") or 0),
+                            "char_start": ch.get("char_start"),
+                            "char_end": ch.get("char_end"),
                         },
                     }
                 )
@@ -168,6 +170,7 @@ def ingest_sheet_rag(
     *,
     force: bool = False,
     expected_num_regions: Optional[int] = None,
+    regions_per_page: Optional[List[int]] = None,
     full_page: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """
@@ -199,21 +202,38 @@ def ingest_sheet_rag(
     delete_rag_chunks_for_document(document_id)
 
     use_full_page = full_page
-    if use_full_page is None:
+    if regions_per_page:
+        use_full_page = False
+    elif use_full_page is None:
         use_full_page = _preprocess_options_from_env().get("full_page", True)
 
     is_pdf = path.suffix.lower() == ".pdf"
     page_count = _pdf_page_count(path) if is_pdf else 1
 
     all_regions: List[Dict[str, Any]] = []
-    preprocess_meta: Dict[str, Any] = {"pages": []}
+    preprocess_meta: Dict[str, Any] = {"pages": [], "regions_per_page": regions_per_page}
 
     for page_idx in range(page_count):
+        page_expected = expected_num_regions
+        page_full_page = bool(use_full_page)
+        if regions_per_page:
+            if page_idx >= len(regions_per_page):
+                preprocess_meta["pages"].append(
+                    {"page": page_idx + 1, "regions_found": 0, "skipped": True}
+                )
+                continue
+            page_expected = int(regions_per_page[page_idx])
+            if page_expected < 1:
+                preprocess_meta["pages"].append(
+                    {"page": page_idx + 1, "regions_found": 0, "skipped": True}
+                )
+                continue
+            page_full_page = False
         pp = preprocess_pipeline(
             path,
-            expected_num_regions=expected_num_regions,
+            expected_num_regions=page_expected,
             pdf_page_index=page_idx,
-            full_page=bool(use_full_page),
+            full_page=page_full_page,
         )
         preprocess_meta["pages"].append(
             {
