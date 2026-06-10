@@ -1,0 +1,441 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Reports — GRADE AI</title>
+  <meta name="description" content="Academic integrity reports — review and download comprehensive analysis for student submissions."/>
+  <link rel="stylesheet" href="style.css"/>
+  <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200" rel="stylesheet"/>
+  <style>
+    .filter-bar {
+      background: var(--surface-container-lowest);
+      border: 1px solid #e9ecf3;
+      border-radius: var(--radius-lg);
+      padding: 1.5rem;
+      box-shadow: var(--shadow-md);
+      display: grid;
+      grid-template-columns: repeat(3, 1fr) auto;
+      gap: 1.25rem;
+      align-items: flex-end;
+      margin-bottom: 2rem;
+    }
+
+    @media (max-width: 900px) {
+      .filter-bar { grid-template-columns: 1fr 1fr; }
+    }
+
+    .report-row {
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+      padding: 1rem 1.5rem;
+      border-top: 1px solid #f8fafc;
+      transition: background var(--transition);
+      cursor: pointer;
+    }
+
+    .report-row:hover { background: #f8fafc; }
+
+    .report-thumb {
+      width: 3.5rem;
+      height: 4.5rem;
+      border-radius: var(--radius);
+      border: 1px solid #e2e8f0;
+      overflow: hidden;
+      position: relative;
+      flex-shrink: 0;
+      transition: border-color var(--transition);
+    }
+
+    .report-row:hover .report-thumb { border-color: #93c5fd; }
+
+    .report-thumb img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      filter: grayscale(1);
+      transition: filter var(--transition);
+    }
+
+    .report-row:hover .report-thumb img { filter: grayscale(0); }
+
+    .report-thumb-overlay {
+      position: absolute;
+      inset: 0;
+      background: rgba(15,23,42,0.4);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      opacity: 0;
+      transition: opacity var(--transition);
+    }
+
+    .report-row:hover .report-thumb-overlay { opacity: 1; }
+
+    .pagination {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 1.25rem 1.5rem;
+      border-top: 1px solid #f8fafc;
+    }
+
+    .page-btn {
+      width: 2rem;
+      height: 2rem;
+      border-radius: var(--radius);
+      border: none;
+      background: transparent;
+      cursor: pointer;
+      font-size: 0.875rem;
+      font-weight: 700;
+      color: var(--on-surface-variant);
+      transition: all var(--transition);
+    }
+
+    .page-btn:hover { background: #f1f5f9; }
+    .page-btn.active { background: var(--primary); color: #fff; }
+
+    .insight-card {
+      background: var(--primary);
+      border-radius: var(--radius-xl);
+      padding: 2rem;
+      color: #fff;
+      position: relative;
+      overflow: hidden;
+      box-shadow: var(--shadow-lg);
+    }
+
+    .insight-card::after {
+      content: '';
+      position: absolute;
+      right: -3rem;
+      bottom: -3rem;
+      width: 10rem;
+      height: 10rem;
+      background: rgba(255,255,255,0.08);
+      border-radius: 50%;
+      filter: blur(20px);
+    }
+  </style>
+</head>
+<body>
+
+<div class="app-shell">
+  <aside class="sidebar" id="sidebar-mount"></aside>
+
+  <div class="main-content">
+    <header class="topbar" id="topbar-mount"></header>
+
+    <div class="page-wrapper">
+
+      <!-- ── Page Header ─────────────────────────── -->
+      <header style="display:flex;justify-content:space-between;align-items:flex-end;margin-bottom:2.5rem;" class="fade-in-up">
+        <div>
+          <h2 style="font-size:1.75rem;font-weight:800;letter-spacing:-0.02em;">Academic Reports</h2>
+          <p style="color:var(--on-surface-variant);margin-top:0.375rem;max-width:480px;">
+            Review and download comprehensive integrity analysis for individual student submissions and batch evaluations.
+          </p>
+        </div>
+        <button class="btn btn-secondary">
+          <span class="material-symbols-outlined">share</span>
+          Share Export
+        </button>
+      </header>
+
+      <!-- ── Filters ─────────────────────────────── -->
+      <div class="filter-bar">
+        <div class="form-group">
+          <label class="form-label">Date Range</label>
+          <div style="position:relative;">
+            <span class="material-symbols-outlined" style="position:absolute;left:0.625rem;top:50%;transform:translateY(-50%);font-size:1.125rem;color:var(--outline);">calendar_today</span>
+            <select class="form-select" style="padding-left:2.25rem;">
+              <option>Last 30 Days</option>
+              <option>Last Quarter</option>
+              <option>Academic Year 2023-24</option>
+              <option>Custom Range</option>
+            </select>
+          </div>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Subject / Course</label>
+          <div style="position:relative;">
+            <span class="material-symbols-outlined" style="position:absolute;left:0.625rem;top:50%;transform:translateY(-50%);font-size:1.125rem;color:var(--outline);">book</span>
+            <select class="form-select" style="padding-left:2.25rem;" id="subject-filter">
+              <option>All Subjects</option>
+              <option>Computer Science 101</option>
+              <option>Advanced Ethics</option>
+              <option>World History</option>
+              <option>Physics</option>
+            </select>
+          </div>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Score Range</label>
+          <div style="position:relative;">
+            <span class="material-symbols-outlined" style="position:absolute;left:0.625rem;top:50%;transform:translateY(-50%);font-size:1.125rem;color:var(--outline);">analytics</span>
+            <select class="form-select" style="padding-left:2.25rem;" id="score-filter">
+              <option>All Scores</option>
+              <option>High Risk (0–40%)</option>
+              <option>Moderate (41–75%)</option>
+              <option>Low Risk (76–100%)</option>
+            </select>
+          </div>
+        </div>
+        <div>
+          <button class="btn" style="background:#eff6ff;color:var(--primary);font-weight:600;width:100%;padding:0.625rem 1rem;" onclick="applyFilters()">
+            Apply Filters
+          </button>
+        </div>
+      </div>
+
+      <!-- ── Charts + Insight Row ─────────────────── -->
+      <div style="display:grid;grid-template-columns:2fr 1fr;gap:2rem;margin-bottom:2rem;">
+
+        <!-- Bar Chart -->
+        <div class="card" style="padding:2rem;">
+          <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:1.5rem;">
+            <div>
+              <h3 style="font-size:1rem;font-weight:700;color:#0f172a;">Batch Score Distribution</h3>
+              <p style="font-size:0.75rem;color:var(--outline);margin-top:2px;">Overview of 124 evaluated submissions in current filter</p>
+            </div>
+            <div style="display:flex;gap:1rem;">
+              <div style="display:flex;align-items:center;gap:0.375rem;">
+                <span style="width:0.625rem;height:0.625rem;border-radius:50%;background:#22c55e;display:block;"></span>
+                <span style="font-size:0.625rem;font-weight:700;text-transform:uppercase;color:var(--outline);">Passed</span>
+              </div>
+              <div style="display:flex;align-items:center;gap:0.375rem;">
+                <span style="width:0.625rem;height:0.625rem;border-radius:50%;background:#f59e0b;display:block;"></span>
+                <span style="font-size:0.625rem;font-weight:700;text-transform:uppercase;color:var(--outline);">Warning</span>
+              </div>
+              <div style="display:flex;align-items:center;gap:0.375rem;">
+                <span style="width:0.625rem;height:0.625rem;border-radius:50%;background:#ef4444;display:block;"></span>
+                <span style="font-size:0.625rem;font-weight:700;text-transform:uppercase;color:var(--outline);">Review</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="bar-chart">
+            <div class="bar-col">
+              <div class="bar-tooltip">High Risk: 12%</div>
+              <div class="bar-fill" style="height:25%;background:#fecaca;"></div>
+              <div class="bar-label">0–40%</div>
+            </div>
+            <div class="bar-col">
+              <div class="bar-tooltip">Moderate: 24%</div>
+              <div class="bar-fill" style="height:45%;background:#fde68a;"></div>
+              <div class="bar-label">41–75%</div>
+            </div>
+            <div class="bar-col">
+              <div class="bar-tooltip">Low Risk: 64%</div>
+              <div class="bar-fill" style="height:95%;background:#bbf7d0;"></div>
+              <div class="bar-label">76–100%</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- AI Insight Card -->
+        <div class="insight-card">
+          <div style="display:flex;align-items:center;gap:0.5rem;margin-bottom:1rem;">
+            <span class="material-symbols-outlined" style="color:rgba(255,255,255,0.7);">auto_awesome</span>
+            <span style="font-size:0.625rem;font-weight:700;text-transform:uppercase;letter-spacing:0.1em;color:rgba(255,255,255,0.7);">AI Intelligence Insight</span>
+          </div>
+          <h4 style="font-size:1.125rem;font-weight:700;margin-bottom:0.75rem;line-height:1.4;position:relative;z-index:1;">
+            Batch integrity improved by 14% compared to last semester.
+          </h4>
+          <p style="font-size:0.875rem;color:rgba(255,255,255,0.85);line-height:1.6;position:relative;z-index:1;">
+            CS101 shows a notable decrease in high-risk citations. We recommend updating the citation workshop modules for incoming freshmen.
+          </p>
+          <button class="btn btn-sm" style="margin-top:1.25rem;background:rgba(255,255,255,0.15);color:#fff;border:1px solid rgba(255,255,255,0.25);backdrop-filter:blur(8px);position:relative;z-index:1;">
+            View Details
+          </button>
+        </div>
+
+      </div>
+
+      <!-- ── Reports Table ───────────────────────── -->
+      <div class="card" style="overflow:hidden;">
+        <div style="padding:1.25rem 1.5rem;border-bottom:1px solid #f1f5f9;display:flex;justify-content:space-between;align-items:center;">
+          <h3 style="font-weight:700;color:#0f172a;">Recent Reports</h3>
+          <span style="font-size:0.875rem;color:var(--outline);" id="results-count">Showing 3 of 1,420 results</span>
+        </div>
+
+        <!-- Table header -->
+        <div style="display:grid;grid-template-columns:80px 1fr 100px 80px 100px;padding:0.875rem 1.5rem;background:#f8fafc;gap:1rem;align-items:center;">
+          <span style="font-size:0.625rem;font-weight:700;text-transform:uppercase;letter-spacing:0.06em;color:var(--outline);">Preview</span>
+          <span style="font-size:0.625rem;font-weight:700;text-transform:uppercase;letter-spacing:0.06em;color:var(--outline);">Report Details</span>
+          <span style="font-size:0.625rem;font-weight:700;text-transform:uppercase;letter-spacing:0.06em;color:var(--outline);">Course</span>
+          <span style="font-size:0.625rem;font-weight:700;text-transform:uppercase;letter-spacing:0.06em;color:var(--outline);text-align:center;">Score</span>
+          <span style="font-size:0.625rem;font-weight:700;text-transform:uppercase;letter-spacing:0.06em;color:var(--outline);text-align:right;">Actions</span>
+        </div>
+
+        <!-- Report Rows -->
+        <div id="report-rows"></div>
+
+        <!-- Pagination -->
+        <div class="pagination">
+          <button class="btn btn-secondary btn-sm" id="prev-btn" disabled>Previous</button>
+          <div id="page-nums" style="display:flex;gap:0.375rem;"></div>
+          <button class="btn btn-secondary btn-sm" id="next-btn">Next</button>
+        </div>
+      </div>
+
+    </div><!-- /page-wrapper -->
+
+    <footer class="footer">
+      <div class="footer-inner">
+        <div><div class="footer-brand">GRADE AI</div><div class="footer-copy">© 2024 GRADE AI. Academic Integrity Guaranteed.</div></div>
+        <div class="footer-links">
+          <a href="#">Privacy Policy</a><a href="#">Terms of Service</a><a href="#">Security</a><a href="#">Contact</a>
+        </div>
+      </div>
+    </footer>
+  </div>
+</div>
+
+<script src="shared.js"></script>
+<script>
+  renderSidebar('reports');
+  renderTopbar('Academic Reports', false);
+
+  const REPORTS = [
+    {
+      thumb: 'https://lh3.googleusercontent.com/aida-public/AB6AXuAaeH2u-lsSarlGbV_PDaPbwBHmcslhjr5WP7unp_w1NkEwAp3ih3Lny91zwe66FqZL1DJGODTpZQ0Mq9Xdjv3Y2f5Ojp77DDwTmQqcBsF4aSKlMfvk2gSPiZZ_4GIZLFx2WRzZ1MG1S3L_SFgyEJtR4LurbvjsaZYT_EACIlSNj9MKFeRAAdVoN-Sz_NSJh7A8TSzR2G8P344WPMpx8w6EXeDSmSRZ79qOIQRgJDwkaSAhgjn9qcB36BPZzSezPITESCJO8VhbXu4',
+      name: 'Final_Thesis_Revision_V4.pdf',
+      student: 'Alexander Thorne',
+      date: 'Oct 12, 2023',
+      course: 'CS101',
+      score: 98,
+      risk: 'Low Risk',
+      riskClass: 'chip-success',
+    },
+    {
+      thumb: 'https://lh3.googleusercontent.com/aida-public/AB6AXuBZQ9VkyatwCYH4OTiQIGGZX1b44HzRp7n-ik5nIWnzGUr-eW7GB39TZnLmmsrL7WkB-TX3Vhc5JHj3BwUdRzkmnKACdbr1sDy3p-x7Zk-GUh0OrBCVFFdqtRMSVvgmVtVs2nT9P6p3LXfZv3dOSl6liGiyj4wAYjqxC6lT9VC8oYH3ODMoTNEto-2WMAGrZRoQX2PEliCHDLYY6vABPQi7vIdtM9b-awEX80ive4GJ6sFOV-CODlPKVRxekxcxbTavJ-bf3LL7QEM',
+      name: 'Ethics_Essay_Submission.pdf',
+      student: 'Marcus Vane',
+      date: 'Oct 11, 2023',
+      course: 'PHIL202',
+      score: 32,
+      risk: 'High Risk',
+      riskClass: 'chip-error',
+    },
+    {
+      thumb: 'https://lh3.googleusercontent.com/aida-public/AB6AXuCe3Cuch_KwPrLYy1UgY89cfdmG5C0UqPvQOwaiYNMxIq9HQ0B43B2Dw8tzML5rkLVF2WSZ6qOn0odPoEibkBvHAo65AncplSjS6Hy3B46CA33by0Yb5p2TbBu7ksjEAPLk6cpr5DmC1sBZNWkq5up3n_g79-wkO4nCMy2Lyu8XyZZDbVXx5_lclDJ0S5vJcEaM0_qQGiLTZOpbtdWmzXnYp6-mLlX-ClNWw2b7qJ8RU5OFWnxz_d-p8gcO4DjEMPwjPVi1E8ntvks',
+      name: 'Lab_Report_Organic_Chem.pdf',
+      student: 'Sarah Jenkins',
+      date: 'Oct 10, 2023',
+      course: 'CHEM301',
+      score: 67,
+      risk: 'Moderate',
+      riskClass: 'chip-warning',
+    },
+  ];
+
+  let allReports = [...REPORTS];
+
+  function scoreColor(s) {
+    if (s >= 76) return '#16a34a';
+    if (s >= 41) return '#d97706';
+    return '#dc2626';
+  }
+
+  function renderRows(rows) {
+    const container = document.getElementById('report-rows');
+    container.innerHTML = '';
+    rows.forEach(r => {
+      const row = document.createElement('div');
+      row.className = 'report-row';
+      row.style.display = 'grid';
+      row.style.gridTemplateColumns = '80px 1fr 100px 80px 100px';
+      row.style.gap = '1rem';
+      row.style.alignItems = 'center';
+      row.innerHTML = `
+        <div class="report-thumb">
+          <img src="${r.thumb}" alt="${r.name}" loading="lazy"/>
+          <div class="report-thumb-overlay">
+            <span class="material-symbols-outlined" style="color:#fff;font-size:1.25rem;">visibility</span>
+          </div>
+        </div>
+        <div>
+          <div style="font-weight:600;color:#0f172a;font-size:0.875rem;">${r.name}</div>
+          <div style="font-size:0.75rem;color:var(--outline);">Student: ${r.student} · ${r.date}</div>
+        </div>
+        <span class="chip chip-neutral">${r.course}</span>
+        <div style="text-align:center;">
+          <div style="font-size:0.875rem;font-weight:700;color:${scoreColor(r.score)};">${r.score}%</div>
+          <div style="font-size:0.5625rem;font-weight:700;text-transform:uppercase;color:var(--outline);">${r.risk}</div>
+        </div>
+        <div style="display:flex;justify-content:flex-end;gap:0.25rem;">
+          <button class="icon-btn" title="Preview PDF" aria-label="Preview">
+            <span class="material-symbols-outlined" style="font-size:1.125rem;">zoom_in</span>
+          </button>
+          <button class="icon-btn" title="Download PDF" aria-label="Download" onclick="downloadReport('${r.name}')">
+            <span class="material-symbols-outlined" style="font-size:1.125rem;">download</span>
+          </button>
+        </div>
+      `;
+      container.appendChild(row);
+    });
+  }
+
+  function buildPagination(total, current) {
+    const pns = document.getElementById('page-nums');
+    pns.innerHTML = '';
+    [1,2,3].forEach(n => {
+      const btn = document.createElement('button');
+      btn.className = `page-btn${n === current ? ' active' : ''}`;
+      btn.textContent = n;
+      btn.addEventListener('click', () => buildPagination(total, n));
+      pns.appendChild(btn);
+    });
+    const ellipsis = document.createElement('span');
+    ellipsis.textContent = '…';
+    ellipsis.style.cssText = 'padding:0 0.5rem;color:var(--outline);line-height:2rem;';
+    pns.appendChild(ellipsis);
+    const last = document.createElement('button');
+    last.className = 'page-btn';
+    last.textContent = '59';
+    pns.appendChild(last);
+  }
+
+  function applyFilters() {
+    const subject = document.getElementById('subject-filter').value;
+    const score   = document.getElementById('score-filter').value;
+    let filtered = [...REPORTS];
+    if (score === 'High Risk (0–40%)')     filtered = filtered.filter(r => r.score <= 40);
+    if (score === 'Moderate (41–75%)')     filtered = filtered.filter(r => r.score > 40 && r.score <= 75);
+    if (score === 'Low Risk (76–100%)')    filtered = filtered.filter(r => r.score > 75);
+    allReports = filtered;
+    renderRows(allReports);
+    document.getElementById('results-count').textContent = `Showing ${allReports.length} of 1,420 results`;
+  }
+
+  async function downloadReport(name) {
+    // Try API download
+    const data = await apiFetch(`/report/${encodeURIComponent(name)}`);
+    if (data && data.url) {
+      window.open(data.url, '_blank');
+    } else {
+      alert(`Downloading ${name} (API offline — connect backend at localhost:8000)`);
+    }
+  }
+
+  // Initial render
+  renderRows(allReports);
+  buildPagination(59, 1);
+
+  // Load live data if available
+  (async () => {
+    const ok = await checkApiHealth();
+    if (ok) {
+      const data = await apiFetch('/reports?limit=20');
+      if (data && data.reports) {
+        renderRows(data.reports);
+        document.getElementById('results-count').textContent = `Showing ${data.reports.length} of ${data.total} results`;
+      }
+    }
+  })();
+</script>
+</body>
+</html>

@@ -1,0 +1,511 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Settings — GRADE AI</title>
+  <meta name="description" content="System configuration — manage OCR engine, AI grading, API keys, database and theme settings."/>
+  <link rel="stylesheet" href="style.css"/>
+  <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200" rel="stylesheet"/>
+  <style>
+    .settings-section {
+      background: var(--surface-container-lowest);
+      border: 1px solid #e9ecf3;
+      border-radius: var(--radius-lg);
+      padding: 2rem;
+      box-shadow: var(--shadow-md);
+    }
+
+    .settings-section h3 {
+      font-size: 1rem;
+      font-weight: 700;
+      color: #0f172a;
+      margin-bottom: 0.25rem;
+    }
+
+    .settings-section > p {
+      font-size: 0.875rem;
+      color: var(--on-surface-variant);
+      margin-bottom: 1.5rem;
+    }
+
+    /* OCR Radio Cards */
+    .ocr-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 1rem;
+    }
+
+    @media (max-width: 800px) { .ocr-grid { grid-template-columns: 1fr 1fr; } }
+
+    .ocr-card {
+      border: 1.5px solid #e2e8f0;
+      border-radius: var(--radius-lg);
+      padding: 1.25rem;
+      cursor: pointer;
+      transition: border-color var(--transition), box-shadow var(--transition);
+      position: relative;
+    }
+
+    .ocr-card:hover { border-color: #adc6ff; }
+
+    .ocr-card.selected {
+      border-color: var(--primary);
+      background: rgba(0,88,190,0.02);
+      box-shadow: 0 0 0 3px rgba(0,88,190,0.1);
+    }
+
+    .ocr-card input { position: absolute; opacity: 0; width: 0; height: 0; }
+
+    .ocr-card-top {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 0.75rem;
+    }
+
+    .ocr-icon {
+      width: 2rem;
+      height: 2rem;
+      border-radius: var(--radius);
+      background: #f1f5f9;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 1rem;
+      font-weight: 700;
+      color: var(--on-surface-variant);
+    }
+
+    .check-indicator {
+      width: 1.25rem;
+      height: 1.25rem;
+      border-radius: 50%;
+      border: 2px solid #e2e8f0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: all var(--transition);
+    }
+
+    .ocr-card.selected .check-indicator {
+      border-color: var(--primary);
+      background: var(--primary);
+      color: #fff;
+    }
+
+    .ocr-card-name { font-size: 0.875rem; font-weight: 700; color: #0f172a; margin-bottom: 0.25rem; }
+    .ocr-card-desc { font-size: 0.75rem; color: var(--on-surface-variant); }
+
+    /* Toggle row */
+    .toggle-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 1rem;
+      border-radius: var(--radius);
+      border: 1px solid #f1f5f9;
+      transition: background var(--transition);
+    }
+
+    .toggle-row:hover { background: #f8fafc; }
+
+    .toggle-row.featured {
+      background: rgba(0,88,190,0.03);
+      border-color: rgba(0,88,190,0.1);
+    }
+
+    /* Theme toggle */
+    .theme-toggle {
+      display: flex;
+      background: var(--surface-container-low);
+      border-radius: var(--radius-lg);
+      padding: 0.25rem;
+      gap: 0.25rem;
+    }
+
+    .theme-btn {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0.5rem;
+      padding: 0.5rem 1rem;
+      border-radius: var(--radius);
+      border: none;
+      cursor: pointer;
+      font-size: 0.875rem;
+      font-weight: 600;
+      transition: all var(--transition);
+      color: var(--outline);
+      background: transparent;
+    }
+
+    .theme-btn.active {
+      background: #fff;
+      color: var(--primary);
+      box-shadow: var(--shadow-sm);
+    }
+
+    /* DB Code block */
+    .code-block {
+      background: #0f172a;
+      color: #94a3b8;
+      border-radius: var(--radius);
+      padding: 0.875rem 1rem;
+      font-family: monospace;
+      font-size: 0.8125rem;
+      overflow-x: auto;
+      white-space: nowrap;
+    }
+  </style>
+</head>
+<body>
+
+<div class="app-shell">
+  <aside class="sidebar" id="sidebar-mount"></aside>
+
+  <div class="main-content">
+    <header class="topbar" id="topbar-mount"></header>
+
+    <div class="page-wrapper" style="max-width:880px;">
+
+      <!-- Page header -->
+      <header style="margin-bottom:3rem;" class="fade-in-up">
+        <h2 style="font-size:1.75rem;font-weight:800;letter-spacing:-0.02em;margin-bottom:0.375rem;">System Configuration</h2>
+        <p style="color:var(--on-surface-variant);max-width:520px;">
+          Manage your academic integrity engine, API connections, and interface preferences. Changes are applied globally to the institution.
+        </p>
+      </header>
+
+      <div style="display:flex;flex-direction:column;gap:2rem;">
+
+        <!-- ── OCR Engine ─────────────────────────── -->
+        <section class="settings-section">
+          <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:1.75rem;">
+            <div>
+              <h3>OCR Engine</h3>
+              <p style="margin-bottom:0;">Select the optical character recognition provider for document digitization.</p>
+            </div>
+            <span class="chip chip-info">High Precision</span>
+          </div>
+          <div class="ocr-grid" id="ocr-grid">
+
+            <label class="ocr-card selected" data-ocr="google" onclick="selectOCR('google')">
+              <input type="radio" name="ocr" value="google" checked/>
+              <div class="ocr-card-top">
+                <div class="ocr-icon" style="background:#e8f0fe;color:#4285f4;font-weight:800;font-size:0.75rem;">G</div>
+                <div class="check-indicator">
+                  <span class="material-symbols-outlined" style="font-size:0.875rem;font-variation-settings:'FILL' 1;">check</span>
+                </div>
+              </div>
+              <div class="ocr-card-name">Google Cloud Vision</div>
+              <div class="ocr-card-desc">Optimized for handwritten text and low-res scans.</div>
+            </label>
+
+            <label class="ocr-card" data-ocr="azure" onclick="selectOCR('azure')">
+              <input type="radio" name="ocr" value="azure"/>
+              <div class="ocr-card-top">
+                <div class="ocr-icon" style="background:#e8f4fd;color:#0078d4;font-weight:800;font-size:0.75rem;">Az</div>
+                <div class="check-indicator"></div>
+              </div>
+              <div class="ocr-card-name">Azure Form Recognizer</div>
+              <div class="ocr-card-desc">Superior table extraction and layout analysis.</div>
+            </label>
+
+            <label class="ocr-card" data-ocr="paddle" onclick="selectOCR('paddle')">
+              <input type="radio" name="ocr" value="paddle"/>
+              <div class="ocr-card-top">
+                <div class="ocr-icon" style="background:#fef9ec;color:#f2a519;font-weight:800;font-size:0.625rem;">PAD</div>
+                <div class="check-indicator"></div>
+              </div>
+              <div class="ocr-card-name">PaddleOCR</div>
+              <div class="ocr-card-desc">Open-source multi-lingual with strong accuracy.</div>
+            </label>
+
+            <label class="ocr-card" data-ocr="trocr" onclick="selectOCR('trocr')">
+              <input type="radio" name="ocr" value="trocr"/>
+              <div class="ocr-card-top">
+                <div class="ocr-icon" style="background:#f5f3ff;color:#7c3aed;font-weight:800;font-size:0.625rem;">TR</div>
+                <div class="check-indicator"></div>
+              </div>
+              <div class="ocr-card-name">TrOCR</div>
+              <div class="ocr-card-desc">Microsoft transformer-based handwriting model.</div>
+            </label>
+
+          </div>
+
+          <!-- Cloud-only toggles -->
+          <div style="margin-top:1.5rem;display:flex;flex-direction:column;gap:0.75rem;">
+            <div class="toggle-row">
+              <div>
+                <div style="font-size:0.875rem;font-weight:600;">Cloud-only mode</div>
+                <div style="font-size:0.75rem;color:var(--outline);">Disable local PaddleOCR/TrOCR fallback</div>
+              </div>
+              <label class="toggle">
+                <input type="checkbox" id="cloud-only"/>
+                <div class="toggle-track"></div>
+                <div class="toggle-thumb"></div>
+              </label>
+            </div>
+            <div class="toggle-row">
+              <div>
+                <div style="font-size:0.875rem;font-weight:600;">Google-only mode</div>
+                <div style="font-size:0.75rem;color:var(--outline);">Cloud tier uses only Google Vision (no Azure fallback)</div>
+              </div>
+              <label class="toggle">
+                <input type="checkbox" id="google-only"/>
+                <div class="toggle-track"></div>
+                <div class="toggle-thumb"></div>
+              </label>
+            </div>
+          </div>
+        </section>
+
+        <!-- ── AI Grading ─────────────────────────── -->
+        <section class="settings-section">
+          <h3 style="margin-bottom:1.5rem;">AI Grading &amp; Intelligence</h3>
+          <div style="display:flex;flex-direction:column;gap:0.75rem;">
+
+            <div class="toggle-row featured">
+              <div style="display:flex;gap:0.875rem;align-items:flex-start;">
+                <span class="material-symbols-outlined" style="color:var(--primary);margin-top:2px;font-variation-settings:'FILL' 1;">auto_awesome</span>
+                <div>
+                  <p style="font-size:0.875rem;font-weight:700;color:#0f172a;">Enable LLM-based Scoring</p>
+                  <p style="font-size:0.75rem;color:var(--outline);">Use Gemini for nuanced semantic analysis and rubric-based grading (requires <code>GRADE_ENABLE_LLM</code>).</p>
+                </div>
+              </div>
+              <label class="toggle">
+                <input type="checkbox" id="llm-toggle" checked/>
+                <div class="toggle-track"></div>
+                <div class="toggle-thumb"></div>
+              </label>
+            </div>
+
+            <div class="toggle-row">
+              <div style="display:flex;gap:0.875rem;align-items:flex-start;">
+                <span class="material-symbols-outlined" style="color:var(--on-surface-variant);margin-top:2px;">person_search</span>
+                <div>
+                  <p style="font-size:0.875rem;font-weight:700;color:#0f172a;">Human-in-the-loop Validation</p>
+                  <p style="font-size:0.75rem;color:var(--outline);">Require manual review for scores with confidence levels below 85%.</p>
+                </div>
+              </div>
+              <label class="toggle">
+                <input type="checkbox" id="hitl-toggle"/>
+                <div class="toggle-track"></div>
+                <div class="toggle-thumb"></div>
+              </label>
+            </div>
+
+          </div>
+        </section>
+
+        <!-- ── API + DB Row ───────────────────────── -->
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:2rem;">
+
+          <!-- API Keys -->
+          <section class="settings-section" style="display:flex;flex-direction:column;">
+            <h3>API Configuration</h3>
+            <p>Credentials for OCR and LLM services.</p>
+            <div style="display:flex;flex-direction:column;gap:1rem;flex:1;">
+
+              <div class="form-group">
+                <label class="form-label" for="google-key">Google Cloud API Key</label>
+                <div style="position:relative;">
+                  <input class="form-input" type="password" id="google-key" placeholder="AIzaSy…" autocomplete="off"/>
+                  <button class="icon-btn" style="position:absolute;right:0.25rem;top:50%;transform:translateY(-50%);" onclick="toggleKey('google-key',this)" title="Show/hide key">
+                    <span class="material-symbols-outlined" style="font-size:1.125rem;">visibility</span>
+                  </button>
+                </div>
+              </div>
+
+              <div class="form-group">
+                <label class="form-label" for="gemini-key">Gemini API Key</label>
+                <div style="position:relative;">
+                  <input class="form-input" type="password" id="gemini-key" placeholder="Enter key…" autocomplete="off"/>
+                  <button class="icon-btn" style="position:absolute;right:0.25rem;top:50%;transform:translateY(-50%);" onclick="toggleKey('gemini-key',this)" title="Show/hide key">
+                    <span class="material-symbols-outlined" style="font-size:1.125rem;">visibility</span>
+                  </button>
+                </div>
+              </div>
+
+              <div class="form-group">
+                <label class="form-label" for="azure-key">Azure Cognitive Services Key</label>
+                <div style="position:relative;">
+                  <input class="form-input" type="password" id="azure-key" placeholder="Enter key…" autocomplete="off"/>
+                  <button class="icon-btn" style="position:absolute;right:0.25rem;top:50%;transform:translateY(-50%);" onclick="toggleKey('azure-key',this)" title="Show/hide key">
+                    <span class="material-symbols-outlined" style="font-size:1.125rem;">visibility</span>
+                  </button>
+                </div>
+              </div>
+
+            </div>
+            <div style="margin-top:1.25rem;padding-top:1rem;border-top:1px solid #f1f5f9;">
+              <button class="btn-ghost btn btn-sm" style="font-size:0.8125rem;">Rotate Keys &amp; Logout Others</button>
+            </div>
+          </section>
+
+          <!-- DB + Theme -->
+          <div style="display:flex;flex-direction:column;gap:2rem;">
+
+            <!-- Database Status -->
+            <section class="settings-section">
+              <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1.25rem;">
+                <h3>Database</h3>
+                <div style="display:flex;align-items:center;gap:0.5rem;background:#f0fdf4;padding:0.25rem 0.75rem;border-radius:var(--radius-full);" id="db-status">
+                  <span style="width:0.5rem;height:0.5rem;background:#22c55e;border-radius:50%;display:block;"></span>
+                  <span style="font-size:0.625rem;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;color:#15803d;">Connected</span>
+                </div>
+              </div>
+
+              <div class="form-group" style="margin-bottom:0.875rem;">
+                <label class="form-label">Connection String (GRADE_DATABASE_URL)</label>
+                <code class="code-block" id="db-url">postgresql://grade:grade@127.0.0.1:5433/grade_test</code>
+              </div>
+
+              <button class="btn btn-secondary" style="width:100%;margin-top:0.25rem;" onclick="testConnection()">
+                Test Connection
+              </button>
+            </section>
+
+            <!-- Theme -->
+            <section class="settings-section">
+              <h3 style="margin-bottom:1.25rem;">Theme</h3>
+              <div class="theme-toggle" role="radiogroup" aria-label="Theme selection">
+                <button class="theme-btn active" id="theme-light" onclick="setTheme('light')">
+                  <span class="material-symbols-outlined" style="font-size:1.125rem;">light_mode</span>
+                  Light
+                </button>
+                <button class="theme-btn" id="theme-dark" onclick="setTheme('dark')">
+                  <span class="material-symbols-outlined" style="font-size:1.125rem;">dark_mode</span>
+                  Dark
+                </button>
+              </div>
+            </section>
+
+          </div>
+        </div>
+
+        <!-- ── Action Footer ──────────────────────── -->
+        <div style="display:flex;justify-content:flex-end;gap:1rem;padding-top:1.5rem;border-top:1px solid #f1f5f9;">
+          <button class="btn btn-secondary" onclick="discardChanges()">Discard Changes</button>
+          <button class="btn btn-primary btn-lg" id="save-btn" onclick="saveConfig()">
+            <span class="material-symbols-outlined">save</span>
+            Save Configuration
+          </button>
+        </div>
+
+      </div><!-- /settings cols -->
+
+    </div><!-- /page-wrapper -->
+
+    <footer class="footer" style="margin-top:3rem;">
+      <div class="footer-inner">
+        <div><div class="footer-brand">GRADE AI</div><div class="footer-copy">© 2024 GRADE AI. Academic Integrity Guaranteed.</div></div>
+        <div class="footer-links">
+          <a href="#">Privacy Policy</a><a href="#">Terms of Service</a><a href="#">Security</a><a href="#">Contact</a>
+        </div>
+      </div>
+    </footer>
+  </div>
+</div>
+
+<script src="shared.js"></script>
+<script>
+  renderSidebar('settings');
+  renderTopbar('System Configuration', false);
+
+  // ── OCR Selection ─────────────────────────────────
+  let selectedOCR = 'google';
+
+  function selectOCR(val) {
+    selectedOCR = val;
+    document.querySelectorAll('.ocr-card').forEach(card => {
+      const isSelected = card.dataset.ocr === val;
+      card.classList.toggle('selected', isSelected);
+      const ind = card.querySelector('.check-indicator');
+      ind.innerHTML = isSelected
+        ? '<span class="material-symbols-outlined" style="font-size:0.875rem;color:#fff;font-variation-settings:\'FILL\' 1;">check</span>'
+        : '';
+    });
+  }
+
+  // ── Show/Hide key ─────────────────────────────────
+  function toggleKey(id, btn) {
+    const input = document.getElementById(id);
+    const isPass = input.type === 'password';
+    input.type = isPass ? 'text' : 'password';
+    btn.querySelector('.material-symbols-outlined').textContent =
+      isPass ? 'visibility_off' : 'visibility';
+  }
+
+  // ── Theme switch ──────────────────────────────────
+  function setTheme(theme) {
+    document.getElementById('theme-light').classList.toggle('active', theme === 'light');
+    document.getElementById('theme-dark').classList.toggle('active',  theme === 'dark');
+    document.documentElement.classList.toggle('dark', theme === 'dark');
+    localStorage.setItem('grade-theme', theme);
+  }
+
+  // Restore saved theme
+  const savedTheme = localStorage.getItem('grade-theme');
+  if (savedTheme) setTheme(savedTheme);
+
+  // ── Test DB connection ────────────────────────────
+  async function testConnection() {
+    const statusEl = document.getElementById('db-status');
+    statusEl.innerHTML = `
+      <span style="width:0.5rem;height:0.5rem;background:#f59e0b;border-radius:50%;display:block;animation:pulse-dot 1s infinite;"></span>
+      <span style="font-size:0.625rem;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;color:#d97706;">Testing…</span>
+    `;
+    const ok = await checkApiHealth();
+    if (ok) {
+      statusEl.innerHTML = `
+        <span style="width:0.5rem;height:0.5rem;background:#22c55e;border-radius:50%;display:block;"></span>
+        <span style="font-size:0.625rem;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;color:#15803d;">Connected</span>
+      `;
+      statusEl.style.background = '#f0fdf4';
+    } else {
+      statusEl.innerHTML = `
+        <span style="width:0.5rem;height:0.5rem;background:#ef4444;border-radius:50%;display:block;"></span>
+        <span style="font-size:0.625rem;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;color:#b91c1c;">Unreachable</span>
+      `;
+      statusEl.style.background = '#fef2f2';
+    }
+  }
+
+  // ── Save config ───────────────────────────────────
+  async function saveConfig() {
+    const btn = document.getElementById('save-btn');
+    btn.disabled = true;
+    btn.innerHTML = '<span class="material-symbols-outlined">hourglass_top</span> Saving…';
+
+    const payload = {
+      ocr_provider: selectedOCR,
+      llm_enabled: document.getElementById('llm-toggle').checked,
+      human_in_loop: document.getElementById('hitl-toggle').checked,
+      cloud_only: document.getElementById('cloud-only').checked,
+      google_only: document.getElementById('google-only').checked,
+    };
+
+    await apiFetch('/config', { method: 'POST', body: JSON.stringify(payload) });
+
+    // Store locally as well
+    localStorage.setItem('grade-config', JSON.stringify(payload));
+
+    btn.innerHTML = '<span class="material-symbols-outlined">check_circle</span> Saved!';
+    btn.style.background = '#22c55e';
+    setTimeout(() => {
+      btn.disabled = false;
+      btn.style.background = '';
+      btn.innerHTML = '<span class="material-symbols-outlined">save</span> Save Configuration';
+    }, 2000);
+  }
+
+  function discardChanges() {
+    // Reload the page to reset all form state
+    window.location.reload();
+  }
+</script>
+</body>
+</html>
