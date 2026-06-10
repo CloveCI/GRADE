@@ -5,6 +5,14 @@ import Footer from '../components/Footer';
 export default function LandingPage() {
   const navigate = useNavigate();
 
+  const API = import.meta.env.VITE_API_URL;
+
+  useEffect(() => {
+    fetch(`${API}/api/exams`)
+      .then(res => res.json())
+      .then(data => console.log(data))
+  }, [])
+
   useEffect(() => {
     const links = document.querySelectorAll('a[href^="#"]');
     const handlers = [];

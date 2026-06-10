@@ -1,6 +1,6 @@
 // Shared API utilities — ported from shared.js
 
-const API_BASE = 'http://localhost:8000';
+const API_BASE = import.meta.env.VITE_API_URL;
 
 export async function apiFetch(endpoint, options = {}) {
   try {
@@ -23,4 +23,9 @@ export async function checkApiHealth() {
   } catch {
     return false;
   }
+}
+
+export async function getExams() {
+  console.log('Calling /api/exams');
+  return apiFetch('/api/exams');
 }
