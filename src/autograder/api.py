@@ -20,9 +20,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
 
 from autograder.db import (
+    create_job,
     database_status,
     delete_answer_keys_for_exam,
     delete_rag_chunks_for_document,
+    get_exam_key_stats,
+    get_job,
     get_rag_chunks_for_sheet,
     get_result,
     get_sheet,
@@ -31,11 +34,14 @@ from autograder.db import (
     insert_evaluation_result,
     insert_sheet,
     list_answer_keys,
+    list_answer_key_prompts,
     list_exams_with_counts,
     list_results,
+    list_sheet_question_answers,
     list_sheets,
     metrics_overview,
     next_answer_key_sort_order_start,
+    update_evaluation_question,
 )
 from autograder.embeddings import embed_text_local
 from autograder.rag.ingest import ingest_keys_rag, ingest_sheet_rag, keys_document_id, sync_exam_ingest
@@ -46,23 +52,22 @@ from autograder.rag.retrieval import (
     retrieve_context_for_grading,
 )
 from autograder.key_pdf import pdf_bytes_to_upload_request
+from autograder.key_docx import docx_bytes_to_upload_request
 from autograder.ocr import (
     google_vision_configured,
     google_vision_credentials_file_ok,
     ocr_patch,
     ocr_patch_consensus,
 )
-from autograder.preprocessing import (
-    PATCH_SIZE,
-    preprocess_pipeline,
-    preprocess_sheet_for_evaluation,
-)
+from autograder.preprocessing import PATCH_SIZE, preprocess_options_from_env, preprocess_pipeline, preprocess_sheet_for_evaluation
 from autograder.report_pdf import build_evaluation_pdf
-from autograder.scoring import prompt_hash, score_answer_llm
+from autograder.scoring import aggregate_grading_confidence, prompt_hash, score_answer_llm
 from autograder.text_format import format_student_answer
 from autograder.schemas import (
     EvaluateRequest,
     EvaluateResponse,
+    JobResponse,
+    PatchQuestionRequest,
     QuestionResult,
     RubricScores,
     RubricBreakdownResponse,
@@ -74,6 +79,14 @@ from autograder.schemas import (
 
 logger = logging.getLogger(__name__)
 
+from autograder.exam_layouts import parse_regions_per_page, prompt_from_expected_answer, resolve_regions_per_page
+
+
+def _resolve_regions_per_page(exam_id: str, req: EvaluateRequest, num_keys: int) -> List[int] | None:
+    return resolve_regions_per_page(
+        exam_id, regions_per_page=req.regions_per_page, num_keys=num_keys
+    )
+
 
 async def _parse_key_upload(
     file: UploadFile,
@@ -82,8 +95,17 @@ async def _parse_key_upload(
 ) -> UploadKeyRequest:
     if not file.filename:
         raise HTTPException(status_code=400, detail="Missing filename")
-    name = file.filename.lower()
     raw = await file.read()
+    return _parse_key_upload_bytes(raw, file.filename, exam_id, default_max_marks)
+
+
+def _parse_key_upload_bytes(
+    raw: bytes,
+    filename: str,
+    exam_id: str | None,
+    default_max_marks: float,
+) -> UploadKeyRequest:
+    name = filename.lower()
 
     if name.endswith(".json"):
         try:
@@ -96,6 +118,17 @@ async def _parse_key_upload(
             return UploadKeyRequest.model_validate(data)
         except Exception as e:
             raise HTTPException(status_code=400, detail=f"Schema error: {e}") from e
+
+    if name.endswith(".docx"):
+        if not exam_id or not str(exam_id).strip():
+            raise HTTPException(
+                status_code=400,
+                detail="DOCX answer keys require form field exam_id (same exam as the answer sheet).",
+            )
+        try:
+            return docx_bytes_to_upload_request(raw, exam_id.strip(), float(default_max_marks))
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
 
     if name.endswith(".pdf"):
         if not exam_id or not str(exam_id).strip():
@@ -110,10 +143,17 @@ async def _parse_key_upload(
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
 
-    raise HTTPException(status_code=400, detail="Upload a .json or text-based .pdf answer key file")
+    raise HTTPException(status_code=400, detail="Upload a .json, .docx, or text-based .pdf answer key file")
 
 
-def _save_sheet_bytes(filename: str, data: bytes, exam_id: str) -> UploadSheetResponse:
+def _save_sheet_bytes(
+    filename: str,
+    data: bytes,
+    exam_id: str,
+    *,
+    regions_per_page: List[int] | None = None,
+    skip_ingest: bool = False,
+) -> UploadSheetResponse:
     _require_database(need_rag=True)
     exid = exam_id.strip()
     if not exid:
@@ -132,11 +172,14 @@ def _save_sheet_bytes(filename: str, data: bytes, exam_id: str) -> UploadSheetRe
 
     sheet_id = insert_sheet(filename, tmp_path, exam_id=exid)
     sheet_ingest: dict = {}
-    try:
-        sheet_ingest = ingest_sheet_rag(sheet_id, force=True)
-    except Exception as e:
-        logger.warning("RAG ingest after sheet upload failed sheet=%s: %s", sheet_id, e)
-        sheet_ingest = {"status": "error", "detail": str(e)}
+    if not skip_ingest:
+        try:
+            keys = list_answer_keys(exid)
+            layout = regions_per_page or resolve_regions_per_page(exid, num_keys=len(keys))
+            sheet_ingest = ingest_sheet_rag(sheet_id, force=True, regions_per_page=layout)
+        except Exception as e:
+            logger.warning("RAG ingest after sheet upload failed sheet=%s: %s", sheet_id, e)
+            sheet_ingest = {"status": "error", "detail": str(e)}
     return UploadSheetResponse(sheet_id=sheet_id, filename=filename, exam_id=exid)
 
 
@@ -147,48 +190,7 @@ def _save_sheet_upload(file: UploadFile, exam_id: str) -> UploadSheetResponse:
 
 
 def _preprocess_options_from_env() -> dict:
-    """Patch size, PDF zoom, segmentation padding, optional full-page OCR."""
-    patch_size = PATCH_SIZE
-    raw_ps = os.environ.get("GRADE_OCR_PATCH_SIZE", "").strip()
-    if raw_ps:
-        try:
-            patch_size = max(128, min(2048, int(raw_ps)))
-        except ValueError:
-            pass
-    pdf_render_scale = 3.0
-    raw_z = os.environ.get("GRADE_PDF_RENDER_SCALE", "").strip()
-    if raw_z:
-        try:
-            pdf_render_scale = max(1.0, min(6.0, float(raw_z)))
-        except ValueError:
-            pass
-    full_page = os.environ.get("GRADE_OCR_FULL_PAGE", "").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
-    bbox_padding_frac = 0.04
-    raw_pf = os.environ.get("GRADE_OCR_BBOX_PADDING_FRAC", "").strip()
-    if raw_pf:
-        try:
-            bbox_padding_frac = max(0.0, min(0.2, float(raw_pf)))
-        except ValueError:
-            pass
-    bbox_padding_px_min = 16
-    raw_pm = os.environ.get("GRADE_OCR_BBOX_PADDING_PX_MIN", "").strip()
-    if raw_pm:
-        try:
-            bbox_padding_px_min = max(0, min(120, int(raw_pm)))
-        except ValueError:
-            pass
-    return {
-        "patch_size": patch_size,
-        "pdf_render_scale": pdf_render_scale,
-        "full_page": full_page,
-        "bbox_padding_frac": bbox_padding_frac,
-        "bbox_padding_px_min": bbox_padding_px_min,
-    }
+    return preprocess_options_from_env()
 
 
 def _load_dotenv() -> None:
@@ -221,7 +223,7 @@ def _aggregate_grading_confidence(conf_levels: List[str]) -> str:
 def _cors_origins() -> List[str]:
     raw = os.environ.get(
         "GRADE_CORS_ORIGINS",
-        "http://localhost:5173,http://127.0.0.1:5173,http://localhost:3000,http://127.0.0.1:3000",
+        "http://localhost:5173,http://127.0.0.1:5173,http://localhost:5174,http://127.0.0.1:5174,http://localhost:3000,http://127.0.0.1:3000",
     )
     return [o.strip() for o in raw.split(",") if o.strip()]
 
@@ -443,7 +445,7 @@ async def upload_key_file(
     default_max_marks: float = Form(default=4.0, ge=0.1, le=1000.0),
 ):
     """
-    Answer key file: `.json` (UploadKeyRequest) or text-based `.pdf`.
+    Answer key file: `.json`, `.docx` (CIE-style), or text-based `.pdf`.
 
     For PDF, include form field `exam_id` (and optionally `default_max_marks` per question).
     """
@@ -457,6 +459,7 @@ async def upload_exam_bundle(
     key_file: UploadFile = File(...),
     sheet_file: UploadFile = File(...),
     default_max_marks: float = Form(default=4.0, ge=0.1, le=1000.0),
+    regions_per_page: str | None = Form(default=None),
 ):
     """
     Upload answer key + sheet together under one ``exam_id``.
@@ -483,9 +486,17 @@ async def upload_exam_bundle(
     sheet_bytes = await sheet_file.read()
     if not sheet_file.filename:
         raise HTTPException(status_code=400, detail="Missing sheet filename")
-    sheet_resp = _save_sheet_bytes(sheet_file.filename, sheet_bytes, ex)
+    sheet_resp = _save_sheet_bytes(sheet_file.filename, sheet_bytes, ex, skip_ingest=True)
     keys_ingest = ingest_keys_rag(ex, force=True)
-    sheet_ingest = ingest_sheet_rag(sheet_resp.sheet_id, force=True)
+    layout = resolve_regions_per_page(
+        ex,
+        regions_per_page=parse_regions_per_page(regions_per_page),
+        num_keys=len(key_resp.key_ids),
+    )
+    sheet_ingest = ingest_sheet_rag(sheet_resp.sheet_id, force=True, regions_per_page=layout)
+    from autograder.sheet_preview import build_sheet_preview
+
+    build_sheet_preview(sheet_resp.sheet_id, layout=layout)
 
     return UploadExamBundleResponse(
         exam_id=ex,
@@ -522,19 +533,61 @@ def api_exams():
 def api_exam_detail(exam_id: str):
     keys = list_answer_keys(exam_id)
     sheets = list_sheets(exam_id=exam_id, limit=1000)
+    results = list_results(exam_id=exam_id, limit=100)
     if not keys and not sheets:
         raise HTTPException(status_code=404, detail="exam_id not found")
+    stats = get_exam_key_stats(exam_id)
     return {
-        "exam": {"id": exam_id, "title": exam_id},
+        "exam": {"id": exam_id, "title": exam_id, **stats},
         "keys": keys,
         "sheets": sheets,
+        "results": results,
     }
 
 
+@app.get("/api/exams/{exam_id}/stats")
+def api_exam_stats(exam_id: str):
+    keys = list_answer_keys(exam_id)
+    if not keys:
+        raise HTTPException(status_code=404, detail="exam_id not found")
+    return get_exam_key_stats(exam_id)
+
+
+@app.get("/api/exams/{exam_id}/question-count")
+def api_exam_question_count(exam_id: str):
+    keys = list_answer_keys(exam_id)
+    if not keys:
+        raise HTTPException(status_code=404, detail="exam_id not found")
+    return {"exam_id": exam_id, "question_count": len(keys)}
+
+
+def _question_text_by_id(exam_id: str) -> Dict[str, str]:
+    rows = list_answer_key_prompts(exam_id)
+    return {
+        str(row["question_id"]): prompt_from_expected_answer(row.get("expected_answer") or "")
+        for row in rows
+    }
+
+
+@app.get("/api/exams/{exam_id}/question-prompts")
+def api_exam_question_prompts(exam_id: str):
+    rows = list_answer_key_prompts(exam_id)
+    if not rows:
+        raise HTTPException(status_code=404, detail="exam_id not found")
+    return [
+        {
+            "question_id": row["question_id"],
+            "prompt": prompt_from_expected_answer(row.get("expected_answer") or ""),
+        }
+        for row in rows
+    ]
+
+
 @app.post("/upload/sheet", response_model=UploadSheetResponse)
-def upload_sheet(
+async def upload_sheet(
     file: UploadFile = File(...),
     exam_id: str | None = Form(default=None),
+    regions_per_page: str | None = Form(default=None),
 ):
     """
     Upload a scanned answer sheet. Pass ``exam_id`` so it pairs with keys for RAG + evaluate.
@@ -545,7 +598,14 @@ def upload_sheet(
             status_code=400,
             detail="exam_id is required on sheet upload (use the same id as your answer keys).",
         )
-    return _save_sheet_upload(file, exid)
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="Missing filename")
+    data = await file.read()
+    keys = list_answer_keys(exid)
+    layout = resolve_regions_per_page(
+        exid, regions_per_page=parse_regions_per_page(regions_per_page), num_keys=len(keys)
+    )
+    return _save_sheet_bytes(file.filename, data, exid, regions_per_page=layout)
 
 
 @app.get("/api/sheets")
@@ -585,21 +645,40 @@ def download_sheet_file(sheet_id: str):
     path = Path(row["path"])
     if not path.is_file():
         raise HTTPException(status_code=404, detail="Stored file missing on disk")
+    media_type = "application/octet-stream"
+    if path.suffix.lower() == ".pdf":
+        media_type = "application/pdf"
+    elif path.suffix.lower() in {".png", ".jpg", ".jpeg", ".gif", ".webp"}:
+        media_type = f"image/{path.suffix.lower().lstrip('.')}"
+        if media_type == "image/jpg":
+            media_type = "image/jpeg"
     return FileResponse(
         path,
         filename=row.get("filename") or path.name,
-        media_type="application/octet-stream",
+        media_type=media_type,
+        content_disposition_type="inline",
     )
 
 
 @app.post("/api/sheet/{sheet_id}/ingest")
-def api_sheet_ingest(sheet_id: str, force: bool = False):
+def api_sheet_ingest(sheet_id: str, force: bool = False, regions_per_page: str | None = None):
     """Re-run OCR → chunk → embed for an uploaded sheet (populates ``rag_chunks``)."""
     row = get_sheet(sheet_id)
     if not row:
         raise HTTPException(status_code=404, detail="sheet_id not found")
+    exam_id = str(row.get("exam_id") or "")
+    keys = list_answer_keys(exam_id) if exam_id else []
+    layout = resolve_regions_per_page(
+        exam_id,
+        regions_per_page=parse_regions_per_page(regions_per_page),
+        num_keys=len(keys),
+    )
     try:
-        return ingest_sheet_rag(sheet_id, force=force)
+        result = ingest_sheet_rag(sheet_id, force=force, regions_per_page=layout)
+        from autograder.sheet_preview import build_sheet_preview
+
+        build_sheet_preview(sheet_id, layout=layout)
+        return result
     except Exception as e:
         logger.exception("sheet ingest failed sheet=%s", sheet_id)
         raise HTTPException(status_code=500, detail=str(e)) from e
@@ -624,6 +703,30 @@ def api_sheet_chunks(sheet_id: str, limit: int = 500):
             }
         )
     return out
+
+
+@app.get("/api/sheet/{sheet_id}/question-regions")
+def api_sheet_question_regions(sheet_id: str):
+    row = get_sheet(sheet_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="sheet_id not found")
+    return {
+        "sheet_id": sheet_id,
+        "exam_id": row.get("exam_id"),
+        "question_regions": row.get("question_regions") or [],
+    }
+
+
+@app.get("/api/sheet/{sheet_id}/question-answers")
+def api_sheet_question_answers(sheet_id: str):
+    row = get_sheet(sheet_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="sheet_id not found")
+    return {
+        "sheet_id": sheet_id,
+        "exam_id": row.get("exam_id"),
+        "question_answers": list_sheet_question_answers(sheet_id),
+    }
 
 
 @app.get("/api/results")
@@ -696,186 +799,30 @@ def api_rag_search(payload: Dict):
 @app.post("/evaluate", response_model=EvaluateResponse)
 def evaluate(req: EvaluateRequest):
     _require_database(need_rag=True, need_evaluation=True)
-    sheet = get_sheet(req.sheet_id)
-    if not sheet:
-        raise HTTPException(status_code=404, detail="sheet_id not found")
-
-    sheet_exam = str(sheet.get("exam_id") or "").strip()
-    if sheet_exam and sheet_exam != req.exam_id:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"Sheet is linked to exam '{sheet_exam}' but evaluate requested '{req.exam_id}'. "
-                "Re-upload the sheet with the correct exam_id or pick a matching exam."
-            ),
-        )
-    if not sheet_exam:
-        raise HTTPException(
-            status_code=400,
-            detail="Sheet has no exam_id; upload it with the same exam_id as your answer keys.",
-        )
-
-    keys = list_answer_keys(req.exam_id)
-    if not keys:
-        raise HTTPException(status_code=404, detail="No answer keys found for exam_id")
+    from autograder.evaluation_service import run_evaluation
 
     try:
-        pp = preprocess_sheet_for_evaluation(
-            sheet["path"],
-            num_answer_keys=len(keys),
-            expected_num_regions=req.expected_num_regions,
-            **_preprocess_options_from_env(),
-        )
-    except FileNotFoundError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
-    except RuntimeError as e:
-        raise HTTPException(status_code=501, detail=str(e)) from e
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
-    if not pp.patches:
-        raise HTTPException(status_code=422, detail="No answer regions detected")
-
-    q_results: List[QuestionResult] = []
-    all_flags: List[str] = []
-    ocr_engines: List[str] = []
-    llm_model = "fallback-legacy"
-
-    try:
-        for idx, patch in enumerate(pp.patches):
-            ocr_res = (
-                ocr_patch_consensus(patch)
-                if req.use_consensus_ocr
-                else ocr_patch(patch)
-            )
-            ocr_engines.append(ocr_res.engine)
-
-            raw_ocr = (ocr_res.text or "").strip()
-            if not raw_ocr:
-                q_results.append(
-                    QuestionResult(
-                        question_id=keys[min(idx, len(keys) - 1)]["question_id"],
-                        region_index=idx,
-                        student_answer="",
-                        ocr_raw="",
-                        awarded_marks=0.0,
-                        max_marks=float(keys[min(idx, len(keys) - 1)]["max_marks"]),
-                        rubric_scores=RubricScores(
-                            factual_accuracy=0,
-                            conceptual_completeness=0,
-                            reasoning=0,
-                            domain_terminology=0,
-                        ),
-                        feedback="No OCR text detected for this answer region.",
-                        grading_confidence="low",
-                        ocr_confidence=float(ocr_res.confidence),
-                        flags=list(ocr_res.flags or []) + ["ocr_empty", "review_required"],
-                    )
-                )
-                continue
-
-            chosen = match_answer_key(idx, raw_ocr, keys, top_k=req.top_k)
-            formatted = format_student_answer(raw_ocr, chosen)
-            student_text = formatted.formatted
-
-            rag_ctx = retrieve_context_for_grading(
-                req.sheet_id,
-                req.exam_id,
-                student_text,
-                chosen,
-                top_k=req.top_k,
-                region_index=idx,
-            )
-
-            eval_res, llm_model = score_answer_llm(
-                student_answer=student_text,
-                model_answer=chosen["expected_answer"],
-                max_marks=float(chosen["max_marks"]),
-                question_text=chosen["question_id"],
-                subject_domain=chosen.get("domain") or "general",
-                ocr_confidence=float(ocr_res.confidence),
-                rubric_override=chosen.get("rubric_override"),
-                rag_context=rag_ctx.get("context_text"),
-            )
-
-            flags = list(
-                set((ocr_res.flags or []) + formatted.flags + eval_res.flags)
-            )
-            if rag_ctx.get("chunk_ids"):
-                flags.append("rag_context_used")
-            if formatted.method == "llm":
-                flags.append("ocr_llm_formatted")
-            all_flags.extend(flags)
-
-            q_results.append(
-                QuestionResult(
-                    question_id=chosen["question_id"],
-                    region_index=idx,
-                    student_answer=student_text,
-                    ocr_raw=ocr_res.text,
-                    awarded_marks=eval_res.awarded_marks,
-                    max_marks=eval_res.max_marks,
-                    rubric_scores=eval_res.rubric_scores,
-                    feedback=eval_res.feedback,
-                    grading_confidence=eval_res.grading_confidence,
-                    ocr_confidence=ocr_res.confidence,
-                    flags=flags,
-                )
-            )
+        return run_evaluation(req)
     except HTTPException:
         raise
     except Exception as e:
         logger.exception("evaluate failed sheet=%s exam=%s", req.sheet_id, req.exam_id)
-        raise HTTPException(
-            status_code=500,
-            detail=f"Evaluation failed: {type(e).__name__}: {e}",
-        ) from e
-
-    total_marks = round(sum(q.awarded_marks for q in q_results), 1)
-    max_total = round(sum(q.max_marks for q in q_results), 1)
-    grading_conf = _aggregate_grading_confidence([q.grading_confidence for q in q_results])
-    confidence_flag = any(q.ocr_confidence < 0.60 for q in q_results) or grading_conf == "low"
-
-    payload = {
-        "sheet_id": req.sheet_id,
-        "exam_id": req.exam_id,
-        "questions": [q.model_dump() for q in q_results],
-        "total_marks": total_marks,
-        "max_total": max_total,
-        "confidence_flag": confidence_flag,
-        "grading_confidence": grading_conf,
-        "ocr_engine_used": ",".join(sorted(set(ocr_engines))),
-        "prompt_hash": prompt_hash(),
-        "llm_model": llm_model,
-        "flags": sorted(set(all_flags)),
-    }
-    result_id = insert_evaluation_result(payload)
-
-    return EvaluateResponse(
-        result_id=result_id,
-        sheet_id=req.sheet_id,
-        exam_id=req.exam_id,
-        total_marks=total_marks,
-        max_total=max_total,
-        confidence_flag=confidence_flag,
-        grading_confidence=grading_conf,
-        prompt_hash=payload["prompt_hash"],
-        llm_model=llm_model,
-        flags=payload["flags"],
-        questions=q_results,
-    )
+        raise HTTPException(status_code=500, detail=f"Evaluation failed: {type(e).__name__}: {e}") from e
 
 
-@app.get("/result/{result_id}", response_model=EvaluateResponse)
-def get_result_endpoint(result_id: str):
-    row = get_result(result_id)
-    if not row:
-        raise HTTPException(status_code=404, detail="result_id not found")
-
-    questions = [QuestionResult.model_validate(q) for q in row["questions"]]
+def _evaluate_response_from_row(result_id: str, row: Dict[str, Any]) -> EvaluateResponse:
+    exam_id = str(row.get("exam_id") or "")
+    question_texts = _question_text_by_id(exam_id) if exam_id else {}
+    questions = []
+    for q in row["questions"]:
+        item = dict(q)
+        if not item.get("question_text"):
+            item["question_text"] = question_texts.get(str(item.get("question_id") or ""), "")
+        questions.append(QuestionResult.model_validate(item))
     return EvaluateResponse(
         result_id=result_id,
         sheet_id=row.get("sheet_id") or "",
-        exam_id=row.get("exam_id") or "",
+        exam_id=exam_id,
         total_marks=row["total_marks"],
         max_total=row["max_total"],
         confidence_flag=row["confidence_flag"],
@@ -884,7 +831,16 @@ def get_result_endpoint(result_id: str):
         llm_model=row["llm_model"],
         flags=row.get("flags") or [],
         questions=questions,
+        created_at=row.get("created_at"),
     )
+
+
+@app.get("/result/{result_id}", response_model=EvaluateResponse)
+def get_result_endpoint(result_id: str):
+    row = get_result(result_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="result_id not found")
+    return _evaluate_response_from_row(result_id, row)
 
 
 @app.get("/result/{result_id}/rubric", response_model=RubricBreakdownResponse)
@@ -929,3 +885,164 @@ def report_pdf(result_id: str):
         media_type="application/pdf",
         headers={"Content-Disposition": f'attachment; filename="grade-report-{result_id}.pdf"'},
     )
+
+
+@app.get("/api/exam/{exam_id}/key-chunks")
+def api_exam_key_chunks(exam_id: str, limit: int = 500):
+    keys = list_answer_keys(exam_id)
+    if not keys:
+        raise HTTPException(status_code=404, detail="exam_id not found")
+    out = []
+    for key in keys:
+        for ch in (key.get("answer_chunks") or [])[:limit]:
+            out.append(
+                {
+                    "chunk_id": ch.get("chunk_id"),
+                    "question_id": key.get("question_id"),
+                    "answer_key_id": key.get("id"),
+                    "chunk_index": ch.get("chunk_index"),
+                    "text": ch.get("text_content") or "",
+                    "char_start": ch.get("char_start"),
+                    "char_end": ch.get("char_end"),
+                }
+            )
+    return out
+
+
+@app.get("/api/sheet/{sheet_id}/preview")
+def api_sheet_preview_meta(sheet_id: str, rebuild: bool = False):
+    row = get_sheet(sheet_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="sheet_id not found")
+    from autograder.sheet_preview import get_sheet_preview
+
+    return get_sheet_preview(sheet_id, force=rebuild)
+
+
+@app.get("/api/sheet/{sheet_id}/preview/page.png")
+def api_sheet_preview_page_legacy(sheet_id: str):
+  return api_sheet_preview_page_num(sheet_id, 1)
+
+
+@app.get("/api/sheet/{sheet_id}/preview/page/{page}.png")
+def api_sheet_preview_page_num(sheet_id: str, page: int):
+    row = get_sheet(sheet_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="sheet_id not found")
+    from autograder.sheet_preview import build_sheet_preview, preview_page_path
+
+    page_num = max(1, int(page))
+    img_path = preview_page_path(sheet_id, page_num)
+    if not img_path.is_file():
+        build_sheet_preview(sheet_id)
+        img_path = preview_page_path(sheet_id, page_num)
+    if not img_path.is_file():
+        raise HTTPException(status_code=404, detail="preview not available")
+    return FileResponse(img_path, media_type="image/png")
+
+
+@app.patch("/result/{result_id}/questions/{region_index}", response_model=EvaluateResponse)
+def patch_result_question(result_id: str, region_index: int, body: PatchQuestionRequest):
+    try:
+        row = update_evaluation_question(
+            result_id,
+            region_index,
+            awarded_marks=body.awarded_marks,
+            feedback=body.feedback,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    return _evaluate_response_from_row(result_id, row)
+
+
+@app.post("/jobs/upload-exam-bundle", response_model=JobResponse)
+async def job_upload_exam_bundle(
+    exam_id: str = Form(...),
+    key_file: UploadFile = File(...),
+    sheet_file: UploadFile = File(...),
+    default_max_marks: float = Form(default=4.0, ge=0.1, le=1000.0),
+    regions_per_page: str | None = Form(default=None),
+):
+    _require_database(need_rag=True)
+    ex = exam_id.strip()
+    if not ex:
+        raise HTTPException(status_code=400, detail="exam_id is required")
+    key_bytes = await key_file.read()
+    sheet_bytes = await sheet_file.read()
+    if not key_file.filename or not sheet_file.filename:
+        raise HTTPException(status_code=400, detail="Missing filename")
+    job_id = create_job(
+        "upload_bundle",
+        {
+            "exam_id": ex,
+            "key_filename": key_file.filename,
+            "sheet_filename": sheet_file.filename,
+            "default_max_marks": default_max_marks,
+            "regions_per_page": regions_per_page,
+        },
+    )
+    from autograder.jobs import run_upload_bundle_job, start_job_thread
+
+    start_job_thread(
+        run_upload_bundle_job,
+        job_id,
+        exam_id=ex,
+        key_bytes=key_bytes,
+        key_filename=key_file.filename,
+        sheet_bytes=sheet_bytes,
+        sheet_filename=sheet_file.filename,
+        default_max_marks=default_max_marks,
+        regions_spec=regions_per_page,
+    )
+    return JobResponse(job_id=job_id, job_type="upload_bundle", status="pending", progress=0, stage="")
+
+
+@app.post("/jobs/upload-sheet", response_model=JobResponse)
+async def job_upload_sheet(
+    file: UploadFile = File(...),
+    exam_id: str = Form(...),
+    regions_per_page: str | None = Form(default=None),
+):
+    _require_database(need_rag=True)
+    exid = exam_id.strip()
+    if not exid:
+        raise HTTPException(status_code=400, detail="exam_id is required")
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="Missing filename")
+    data = await file.read()
+    job_id = create_job(
+        "upload_sheet",
+        {"exam_id": exid, "filename": file.filename, "regions_per_page": regions_per_page},
+    )
+    from autograder.jobs import run_upload_sheet_job, start_job_thread
+
+    start_job_thread(
+        run_upload_sheet_job,
+        job_id,
+        exam_id=exid,
+        sheet_bytes=data,
+        sheet_filename=file.filename,
+        regions_spec=regions_per_page,
+    )
+    return JobResponse(job_id=job_id, job_type="upload_sheet", status="pending", progress=0, stage="")
+
+
+@app.post("/jobs/evaluate", response_model=JobResponse)
+def job_evaluate(req: EvaluateRequest):
+    _require_database(need_rag=True, need_evaluation=True)
+    job_id = create_job("evaluate", req.model_dump())
+    from autograder.jobs import run_evaluate_job, start_job_thread
+
+    start_job_thread(run_evaluate_job, job_id, req.model_dump())
+    return JobResponse(job_id=job_id, job_type="evaluate", status="pending", progress=0, stage="")
+
+
+@app.get("/jobs/{job_id}", response_model=JobResponse)
+def job_status(job_id: str):
+    job = get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="job_id not found")
+    from autograder.jobs import job_to_response
+
+    data = job_to_response(job)
+    return JobResponse(**data)

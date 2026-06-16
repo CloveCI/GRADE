@@ -24,9 +24,14 @@ _KEY_PREFIX = re.compile(
 )
 _MARKS = re.compile(r"\(\d+(?:\.\d+)?\s*marks?\)", re.IGNORECASE)
 _QUESTION_BLEED = re.compile(
-    r"^(?:Write|Define|State|Explain|Calculate|Discuss|List|Describe|Compare|What|How)\b",
+    r"^(?:Write|Define|State|Explain|Calculate|Discuss|List|Describe|Compare|What|How|Briefly)\b",
     re.IGNORECASE,
 )
+_ANS_MARKER = re.compile(
+    r"\b\d{1,2}\s*(?:st|nd|rd|th)?\s*ans\)?",
+    re.IGNORECASE,
+)
+_Q_LABEL = re.compile(r"\b\d{1,2}\s*\.?\s*q\)?\b", re.IGNORECASE)
 
 
 @dataclass
@@ -268,15 +273,83 @@ def _best_keyword_anchor(text: str, keywords: List[str], *, after: int = 0) -> O
     return min(hits)
 
 
+def _question_number(key: Dict[str, Any]) -> Optional[str]:
+    qid = str(key.get("question_id") or "")
+    m = re.search(r"\d+", qid)
+    return m.group(0) if m else None
+
+
+def _anchor_start_for_answer(
+    normalized: str,
+    start: int,
+    key: Dict[str, Any],
+    *,
+    prev_key: Optional[Dict[str, Any]] = None,
+) -> int:
+    """Skip bleed from a prior question at the top of an isolated OCR strip."""
+    qn = _question_number(key)
+    search = normalized[start : start + 320]
+    anchors: List[int] = []
+
+    if qn:
+        for pat in (
+            rf"\b{qn}\s*[).:\-]?\s*(?:Ans|ANS)?\b",
+            rf"\b{qn}\s*\)\s*[aA]\)",
+            rf"\b{qn}\s*\.\s*",
+        ):
+            m = re.search(pat, search, re.I)
+            if m:
+                anchors.append(start + m.start())
+
+    expected = str(key.get("expected_answer") or "")
+    prompt, _ = split_key_expected_answer(expected)
+    for kw in _prompt_keywords(prompt)[:6]:
+        if len(kw) < 5:
+            continue
+        m = re.search(re.escape(kw), search, re.I)
+        if m:
+            anchors.append(start + m.start())
+
+    m = _QUESTION_BLEED.search(search)
+    if m:
+        anchors.append(start + m.start())
+
+    if anchors:
+        return max(start, min(anchors))
+
+    if prev_key:
+        prev_text = str(prev_key.get("expected_answer") or "").lower()
+        head = normalized[start : start + 280].lower()
+        if any(t in prev_text for t in ("union", "weighted", "find operation")):
+            for phrase in (
+                "weighted union",
+                "weighted curion",
+                "union and find",
+                "simple union",
+                "simple cition",
+            ):
+                pos = head.find(phrase)
+                if pos >= 0:
+                    after = normalized.find(".", start + pos)
+                    if after > start:
+                        start = after + 1
+                    break
+    return start
+
+
 def extract_sheet_answer_span(
     region_ocr: str,
     key: Dict[str, Any],
     next_key: Optional[Dict[str, Any]] = None,
+    *,
+    isolated_region: bool = False,
+    prev_key: Optional[Dict[str, Any]] = None,
 ) -> Tuple[int, int, str]:
     """
     Locate student-answer char boundaries inside a (possibly multi-question) OCR region.
 
-    Returns ``(start, end, extracted_text)`` relative to normalized region OCR.
+    When ``isolated_region`` is True (one OCR strip per answer key), only trim local
+    question/answer labels — do not cut at the next question's keywords.
     """
     normalized = normalize_ocr_text(region_ocr)
     if not normalized:
@@ -285,18 +358,56 @@ def extract_sheet_answer_span(
     expected = str(key.get("expected_answer") or "")
     prompt, _ = split_key_expected_answer(expected)
     kws = _prompt_keywords(prompt)
-    start = _best_keyword_anchor(normalized, kws) or 0
+
+    start = 0
+    if isolated_region:
+        ans_m = _ANS_MARKER.search(normalized)
+        if ans_m and ans_m.start() < 120:
+            start = ans_m.end()
+        if prompt:
+            pl = re.sub(r"\s+", " ", prompt.lower()).strip()
+            head = normalized.lower()[: min(220, len(normalized))]
+            pos = head.find(pl[: min(48, len(pl))])
+            if pos >= 0 and pos < 160:
+                start = max(start, pos + len(pl[: min(48, len(pl))]))
+        start = _anchor_start_for_answer(normalized, start, key, prev_key=prev_key)
+    else:
+        ans_m = _ANS_MARKER.search(normalized)
+        if ans_m and ans_m.start() < 140:
+            start = ans_m.end()
+        else:
+            start = _best_keyword_anchor(normalized, kws) or 0
+        ans_m2 = _ANS_MARKER.search(normalized, max(0, start - 40))
+        if ans_m2 and ans_m2.start() >= start - 40:
+            start = ans_m2.end()
+
+    if not isolated_region:
+        if prompt:
+            pl = prompt.lower()
+            pos = normalized.lower().find(pl[: min(48, len(pl))], 0, min(len(normalized), start + 120))
+            if pos >= 0 and pos <= start + 80:
+                start = max(start, pos + len(pl))
 
     end = len(normalized)
     if next_key:
         next_expected = str(next_key.get("expected_answer") or "")
         next_prompt, _ = split_key_expected_answer(next_expected)
         next_kws = _prompt_keywords(next_prompt)
-        nxt = _best_keyword_anchor(normalized, next_kws, after=start + 20)
-        if nxt is not None and nxt > start:
-            end = nxt
+        nxt = _best_keyword_anchor(normalized, next_kws, after=start + 30)
+        if nxt is not None and nxt > start + 40:
+            end = min(end, nxt)
+        for m in _ANS_MARKER.finditer(normalized, start + 40):
+            if m.start() > start + 40:
+                end = min(end, m.start())
+                break
 
     extracted = normalized[start:end].strip()
+    # Drop a leading repeated question stem (common when strip includes printed question text).
+    if prompt:
+        pl = re.sub(r"\s+", " ", prompt.lower()).strip()
+        el = re.sub(r"\s+", " ", extracted.lower()).strip()
+        if el.startswith(pl[: min(len(pl), 60)]):
+            extracted = extracted[len(pl) :].lstrip(" .:)-")
     if len(extracted) < 40 and normalized.strip():
         return 0, len(normalized), normalized.strip()
     return start, end, extracted

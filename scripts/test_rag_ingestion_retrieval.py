@@ -999,18 +999,10 @@ def run_cie_bundle(
 
 
 def _parse_regions_per_page(spec: Optional[str]) -> Optional[List[int]]:
-    if not spec or not str(spec).strip():
-        return None
-    out: List[int] = []
-    for part in str(spec).split(","):
-        part = part.strip()
-        if not part:
-            continue
-        n = int(part)
-        if n < 1:
-            raise ValueError(f"regions per page must be >= 1, got {n!r}")
-        out.append(n)
-    return out or None
+    """Delegate to shared exam_layouts (CLI / API parity)."""
+    from autograder.exam_layouts import parse_regions_per_page
+
+    return parse_regions_per_page(spec)
 
 
 def reingest_sheet_regions(

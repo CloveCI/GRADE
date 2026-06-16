@@ -1,31 +1,29 @@
 import { useEffect } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import Footer from '../components/Footer';
+import { getExams } from '../lib/api';
 
 export default function LandingPage() {
   const navigate = useNavigate();
 
-  const API = import.meta.env.VITE_API_URL;
-
   useEffect(() => {
-    fetch(`${API}/api/exams`)
-      .then(res => res.json())
-      .then(data => console.log(data))
-  }, [])
-
-  useEffect(() => {
-    const links = document.querySelectorAll('a[href^="#"]');
-    const handlers = [];
-    links.forEach(a => {
-      const handler = (e) => {
-        e.preventDefault();
-        const el = document.querySelector(a.getAttribute('href'));
-        if (el) el.scrollIntoView({ behavior: 'smooth' });
-      };
-      a.addEventListener('click', handler);
-      handlers.push({ a, handler });
+    getExams().then((data) => {
+      if (Array.isArray(data) && data.length) {
+        console.info('[GRADE] Exams from API:', data.length);
+      }
     });
-    return () => handlers.forEach(({ a, handler }) => a.removeEventListener('click', handler));
+  }, []);
+
+  useEffect(() => {
+    const handler = (e) => {
+      const link = e.target.closest('a[data-scroll]');
+      if (!link) return;
+      e.preventDefault();
+      const target = document.querySelector(link.getAttribute('href'));
+      if (target) target.scrollIntoView({ behavior: 'smooth' });
+    };
+    document.addEventListener('click', handler);
+    return () => document.removeEventListener('click', handler);
   }, []);
 
   return (
@@ -33,16 +31,16 @@ export default function LandingPage() {
       {/* ── Public Navigation ── */}
       <nav className="pub-nav" role="navigation">
         <div className="pub-nav-inner">
-          <span className="pub-nav-logo">GRADE</span>
+          <Link to="/" className="pub-nav-logo" style={{ textDecoration: 'none', color: 'inherit' }}>GRADE</Link>
           <div className="pub-nav-links">
-            <a href="#features" className="active">Features</a>
-            <a href="#pipeline">How It Works</a>
-            <a href="#" onClick={() => navigate('/dashboard')}>Dashboard</a>
-            <a href="#" onClick={() => navigate('/settings')}>Docs</a>
+            <a href="#features" data-scroll className="active">Features</a>
+            <a href="#pipeline" data-scroll>How It Works</a>
+            <Link to="/dashboard">Dashboard</Link>
+            <Link to="/docs">Docs</Link>
           </div>
           <div className="pub-nav-actions">
-            <button className="nav-login" onClick={() => navigate('/dashboard')}>Login</button>
-            <button className="btn btn-primary btn-sm" onClick={() => navigate('/upload')}>Get Started</button>
+            <button type="button" className="nav-login" onClick={() => navigate('/dashboard')}>Login</button>
+            <button type="button" className="btn btn-primary btn-sm" onClick={() => navigate('/processing')}>Get Started</button>
           </div>
         </div>
       </nav>
@@ -64,7 +62,7 @@ export default function LandingPage() {
                 Harnessing advanced OCR and LLM-based scoring to grade handwritten exam papers with clinical precision and zero manual bias.
               </p>
               <div style={{ display: 'flex', gap: '1rem', flexWrap: 'wrap' }}>
-                <button className="btn btn-primary btn-lg" onClick={() => navigate('/upload')}>
+                <button className="btn btn-primary btn-lg" onClick={() => navigate('/processing')}>
                   <span className="material-symbols-outlined">upload_file</span>
                   Upload Answer Sheet
                 </button>
@@ -178,14 +176,13 @@ export default function LandingPage() {
                     </div>
                     <h3>Instant Analytics</h3>
                     <p>Gain immediate insights into class performance, common misconceptions, and item difficulty indices right after the scan is complete.</p>
-                    <a
-                      href="#"
-                      onClick={(e) => { e.preventDefault(); navigate('/reports'); }}
+                    <Link
+                      to="/reports"
                       style={{ display: 'inline-flex', alignItems: 'center', gap: '0.375rem', color: 'var(--primary)', fontWeight: 600, fontSize: '0.875rem', marginTop: '1rem' }}
                     >
                       Explore Reports Dashboard
                       <span className="material-symbols-outlined" style={{ fontSize: '1rem' }}>arrow_forward</span>
-                    </a>
+                    </Link>
                   </div>
                 </div>
                 <div className="stat-grid" style={{ marginTop: 0, alignSelf: 'flex-end' }}>
@@ -207,7 +204,7 @@ export default function LandingPage() {
             <h2>Ready to transform your evaluation process?</h2>
             <p>Join leading universities and examination boards using GRADE to ensure fair, fast, and accurate scoring.</p>
             <div className="cta-actions">
-              <button className="btn-white" onClick={() => navigate('/upload')}>Get Started Free</button>
+              <button className="btn-white" onClick={() => navigate('/processing')}>Get Started Free</button>
               <button className="btn-outline-white">Contact Sales</button>
             </div>
           </div>

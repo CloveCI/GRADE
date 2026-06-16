@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import AppShell from '../components/AppShell';
-import { apiFetch, checkApiHealth } from '../lib/api';
+import { checkApiHealth, getDatabaseStatus, getIntegrations } from '../lib/api';
 
 const OCR_CARDS = [
   { id: 'google', name: 'Google Cloud Vision', desc: 'Optimized for handwritten text and low-res scans.',      icon: { text: 'G',   bg: '#e8f0fe', color: '#4285f4' } },
@@ -25,18 +25,38 @@ export default function SettingsPage() {
     localStorage.setItem('grade-theme', theme);
   }, [theme]);
 
+  useEffect(() => {
+    (async () => {
+      const ok = await checkApiHealth();
+      if (!ok) {
+        setDbStatus('unreachable');
+        return;
+      }
+      const db = await getDatabaseStatus();
+      if (db?.connected) setDbStatus('connected');
+      else if (db?.configured) setDbStatus('unreachable');
+      else setDbStatus('unreachable');
+
+      const integrations = await getIntegrations();
+      if (integrations?.llm_gemini?.GRADE_ENABLE_LLM != null) {
+        setLlmEnabled(Boolean(integrations.llm_gemini.GRADE_ENABLE_LLM));
+      }
+    })();
+  }, []);
+
   const toggleKey = (key) => setKeyVisibility(prev => ({ ...prev, [key]: !prev[key] }));
 
   const testConnection = async () => {
     setDbStatus('testing');
-    const ok = await checkApiHealth();
-    setDbStatus(ok ? 'connected' : 'unreachable');
+    const db = await getDatabaseStatus();
+    if (db?.connected && db?.schema_ready) setDbStatus('connected');
+    else if (await checkApiHealth()) setDbStatus('unreachable');
+    else setDbStatus('unreachable');
   };
 
   const saveConfig = async () => {
     setSaveState('saving');
     const payload = { ocr_provider: selectedOCR, llm_enabled: llmEnabled, human_in_loop: hitl, cloud_only: cloudOnly, google_only: googleOnly };
-    await apiFetch('/config', { method: 'POST', body: JSON.stringify(payload) });
     localStorage.setItem('grade-config', JSON.stringify(payload));
     setSaveState('saved');
     setTimeout(() => setSaveState('idle'), 2000);

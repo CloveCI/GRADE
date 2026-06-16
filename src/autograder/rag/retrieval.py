@@ -4,10 +4,17 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Tuple
 
-from autograder.db import get_sheet, hybrid_search_rag_chunks, list_answer_keys
+from autograder.db import (
+    get_sheet,
+    hybrid_search_rag_chunks,
+    list_answer_keys,
+    list_rag_chunks_for_corpus,
+)
 from autograder.embeddings import embed_text_local, retrieve_top_k
 from autograder.rag.ingest import exam_rag_document_ids, keys_document_id, sheet_document_id
+from autograder.rag.boundaries import ChunkSpan, assemble_from_spans
 from autograder.rag.query import process_query
+from autograder.rag_extract import normalize_ocr_text
 from autograder.rag.similarity import filter_hits_by_threshold
 
 _EMBED_MATCH_MIN = 0.28
@@ -115,7 +122,7 @@ def _hits_for_question(
     *,
     corpus: str,
 ) -> List[Dict[str, Any]]:
-    """Prefer chunks tagged with the same question_id (answer-key corpus)."""
+    """Prefer chunks tagged with the same question_id."""
     if not question_id:
         return hits
     q = question_id.strip().lower()
@@ -276,6 +283,106 @@ def hybrid_search_for_keys(exam_id: str, query: str, *, top_k: int = 5) -> List[
     return hybrid_search_rag_chunks(q, qv, top_k=top_k, document_id=keys_document_id(exam_id))
 
 
+def _chunk_spans(rows: List[Dict[str, Any]]) -> List[ChunkSpan]:
+    spans: List[ChunkSpan] = []
+    for row in sorted(rows, key=lambda r: int(r.get("chunk_index") or 0)):
+        meta = row.get("meta") or {}
+        if isinstance(meta, str):
+            import json
+
+            try:
+                meta = json.loads(meta)
+            except json.JSONDecodeError:
+                meta = {}
+        spans.append(
+            ChunkSpan(
+                chunk_id=str(row.get("chunk_id") or ""),
+                chunk_index=int(row.get("chunk_index") or 0),
+                char_start=meta.get("char_start"),
+                char_end=meta.get("char_end"),
+                text=str(row.get("text_content") or ""),
+            )
+        )
+    return spans
+
+
+def _dedupe_chunks(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    out: Dict[str, Dict[str, Any]] = {}
+    for row in rows:
+        cid = str(row.get("chunk_id") or "")
+        if not cid:
+            continue
+        out[cid] = row
+    return sorted(out.values(), key=lambda r: int(r.get("chunk_index") or 0))
+
+
+def retrieve_sheet_answer_for_question(
+    sheet_id: str,
+    key: Dict[str, Any],
+    *,
+    question_region: Optional[Dict[str, Any]] = None,
+    region_ocr: str = "",
+    top_k: int = 24,
+) -> Dict[str, Any]:
+    """
+    Retrieve the full answer-sheet text for one marking-scheme question.
+
+    Loads **all** in-scope RAG chunks (by ``question_id`` and physical ``region_id``s),
+    then merges them in chunk order without dropping overlapping pieces.
+    """
+    qid = str(key.get("question_id") or "").strip()
+    doc_id = sheet_document_id(sheet_id)
+    chunks: List[Dict[str, Any]] = []
+
+    if qid:
+        chunks.extend(
+            list_rag_chunks_for_corpus(doc_id, question_id=qid, sheet_id=sheet_id, limit=2000)
+        )
+
+    region_ids: List[str] = []
+    if question_region:
+        region_ids.extend(str(r) for r in (question_region.get("region_ids") or []))
+        for seg in question_region.get("segments") or []:
+            rid = str(seg.get("region_id") or "")
+            if rid and rid not in region_ids:
+                region_ids.append(rid)
+
+    for rid in region_ids:
+        for token in rid.split("+"):
+            token = token.strip()
+            if not token:
+                continue
+            chunks.extend(
+                list_rag_chunks_for_corpus(
+                    doc_id, region_id=token, sheet_id=sheet_id, limit=500
+                )
+            )
+
+    if not chunks:
+        query = _key_corpus_query(key)
+        hits = hybrid_search_rag_chunks(
+            query,
+            embed_text_local(query),
+            top_k=top_k,
+            document_id=doc_id,
+        )
+        chunks = _hits_for_question(hits, qid, corpus="sheet") if qid else hits
+
+    chunks = _dedupe_chunks(chunks)
+    source = normalize_ocr_text(region_ocr)
+    text = assemble_from_spans(source, _chunk_spans(chunks))
+    if not text and chunks:
+        text = assemble_from_spans("", _chunk_spans(chunks))
+
+    return {
+        "question_id": qid,
+        "text": text.strip(),
+        "chunks": chunks,
+        "chunk_ids": [str(c.get("chunk_id") or "") for c in chunks if c.get("chunk_id")],
+        "region_ids": region_ids,
+    }
+
+
 def retrieve_context_for_grading(
     sheet_id: str,
     exam_id: str,
@@ -302,14 +409,24 @@ def retrieve_context_for_grading(
     key_hits = filter_hits_by_threshold(key_hits, min_keep=1)
 
     sheet_query = _sheet_corpus_query(student_text, key)
-    sheet_hits = hybrid_search_rag_chunks(
-        sheet_query,
-        embed_text_local(sheet_query),
-        top_k=per_corpus,
-        document_id=sheet_document_id(sheet_id),
-    )
+    sheet_hits: List[Dict[str, Any]] = []
+    if qid:
+        sheet_hits = list_rag_chunks_for_corpus(
+            sheet_document_id(sheet_id),
+            question_id=qid,
+            sheet_id=sheet_id,
+        )
+    if not sheet_hits:
+        sheet_hits = hybrid_search_rag_chunks(
+            sheet_query,
+            embed_text_local(sheet_query),
+            top_k=per_corpus,
+            document_id=sheet_document_id(sheet_id),
+        )
     sheet_hits = _sort_sheet_hits_for_region(sheet_hits, region_index)
-    sheet_hits = filter_hits_by_threshold(sheet_hits, min_keep=1)
+    sheet_hits = _hits_for_question(sheet_hits, qid, corpus="sheet")
+    if not sheet_hits or len(sheet_hits) < 2:
+        sheet_hits = filter_hits_by_threshold(sheet_hits, min_keep=1)
 
     # Combined hits for API/UI (explorer, debugging)
     all_hits = key_hits + sheet_hits

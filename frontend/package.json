@@ -1,0 +1,11 @@
+{
+  "name": "grade-frontend",
+  "private": true,
+  "description": "Redirects to frontend-react (run npm commands here or in frontend-react/)",
+  "scripts": {
+    "dev": "npm run dev --prefix ../frontend-react",
+    "build": "npm run build --prefix ../frontend-react",
+    "preview": "npm run preview --prefix ../frontend-react",
+    "install:app": "npm install --prefix ../frontend-react"
+  }
+}

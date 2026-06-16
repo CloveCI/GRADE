@@ -67,6 +67,29 @@ def test_upload_key_file(client):
     assert len(r.json()["key_ids"]) == 1
 
 
+def test_upload_key_docx_file(client):
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parents[1] / "cie" / "keys" / "DAA.docx"
+    if not path.is_file():
+        pytest.skip("cie/keys/DAA.docx not in workspace")
+    exam_id = f"docx-{uuid.uuid4().hex[:8]}"
+    with path.open("rb") as fh:
+        r = client.post(
+            "/upload/key/file",
+            files={
+                "file": (
+                    "DAA.docx",
+                    fh,
+                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                )
+            },
+            data={"exam_id": exam_id},
+        )
+    assert r.status_code == 200, r.text
+    assert len(r.json()["key_ids"]) >= 1
+
+
 def test_upload_sheet_and_evaluate_roundtrip(client, synthetic_binary_sheet, monkeypatch, tmp_path):
     """End-to-end HTTP: key file, sheet image, evaluate (OCR/scoring mocked)."""
     import cv2

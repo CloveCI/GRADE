@@ -716,7 +716,7 @@ def ocr_patch(
     *,
     trocr_model_name: str = "microsoft/trocr-base-handwritten",
     trocr_beam_width: int = TROCR_BEAM_WIDTH,
-    retry_delay: float = 1.0,
+    retry_delay: float = 0.15,
 ) -> OCRResult:
     """
     OCR a single preprocessed patch via the three-tier fallback chain.
@@ -795,7 +795,7 @@ def ocr_patch_consensus(
     *,
     trocr_model_name: str = "microsoft/trocr-base-handwritten",
     trocr_beam_width: int = TROCR_BEAM_WIDTH,
-    retry_delay: float = 1.0,
+    retry_delay: float = 0.15,
 ) -> OCRResult:
     """
     Optional multi-pass OCR consensus mode (v2.1-ready):

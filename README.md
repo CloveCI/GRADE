@@ -80,23 +80,37 @@ Passwords with **`$`** in URLs: loaders use `interpolate=False` so `.env` values
    ```
 5. **Tests:** `python -m pytest` needs Postgres (default matches Docker below; override with `GRADE_TEST_DATABASE_URL`).
 
-### Portal UI (`frontend/`)
+### Portal UI (`frontend-react/`)
 
-The **GRADE Companion** app (from `grade-companion-main`) talks to the FastAPI backend. In dev, Vite proxies `/api`, `/upload`, `/evaluate`, `/health`, `/result/`, `/report/`, and `/sheet/` to `http://127.0.0.1:8000` — no CORS setup required.
+The **GRADE Companion** React app talks to the FastAPI backend. In dev, Vite proxies `/api`, `/upload`, `/evaluate`, `/health`, `/result/`, `/report/`, and `/sheet/` to `http://127.0.0.1:8000` — no CORS setup required.
 
 ```powershell
-cd frontend
+cd frontend-react
 copy .env.example .env   # optional; leave VITE_API_URL empty for proxy
 npm install
 npm run dev
 ```
 
-Open the URL Vite prints (often `http://127.0.0.1:5173`). Main flows:
+(`cd frontend` also works — it delegates to `frontend-react`.)
 
-| Route | Backend |
-|-------|---------|
-| `/upload/bundle` | `POST /upload/exam-bundle` + optional `POST /api/exam/{id}/ingest-rag` |
-| `/keys`, `/sheets`, `/evaluate`, `/results`, `/rag`, `/metrics` | `/api/exams`, `/api/sheets`, `POST /evaluate`, `/api/results`, `POST /api/rag/search`, `/api/metrics/overview` |
+Open the URL Vite prints (often `http://127.0.0.1:5173`). Start the API first (repo root):
+
+```powershell
+$env:PYTHONPATH = "src"
+python -m uvicorn autograder.api:app --host 127.0.0.1 --port 8000
+```
+
+In dev, leave `VITE_API_URL` empty (see `frontend-react/.env.example`) — Vite proxies `/api`, `/health`, `/upload`, `/evaluate`, `/result`, `/report`, and `/sheet` to the API.
+
+Main flows:
+
+| UI route | Backend |
+|----------|---------|
+| `/upload` | `POST /upload/exam-bundle` (key + sheet + exam_id) |
+| `/evaluator` | `POST /evaluate` then `GET /result/{id}` |
+| `/dashboard` | `GET /api/metrics/overview`, `GET /api/sheets` |
+| `/reports` | `GET /api/results`, `GET /report/{id}/pdf` |
+| `/settings` | `GET /api/integrations`, `GET /api/database/status` |
 
 Backend config stays in the **repo root** `.env` (`GRADE_DATABASE_URL`, `GRADE_ENABLE_LLM`, `GRADE_GEMINI_API_KEY`). The UI only needs `VITE_API_URL` when the API is on another host (production).
 

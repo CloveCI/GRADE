@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -64,7 +64,24 @@ class EvaluateRequest(BaseModel):
     exam_id: str
     top_k: int = Field(default=3, ge=1, le=10)
     expected_num_regions: Optional[int] = None
+    regions_per_page: Optional[List[int]] = None
     use_consensus_ocr: bool = False
+    force_regrade: bool = False
+
+
+class JobResponse(BaseModel):
+    job_id: str
+    job_type: str
+    status: str
+    progress: int
+    stage: str
+    result: Optional[Dict[str, Any]] = None
+    error: Optional[str] = None
+
+
+class PatchQuestionRequest(BaseModel):
+    awarded_marks: float = Field(ge=0)
+    feedback: Optional[str] = None
 
 
 class RubricScores(BaseModel):
@@ -92,7 +109,11 @@ class EvaluationResult(BaseModel):
 
 class QuestionResult(BaseModel):
     question_id: str
+    question_text: str = ""  # exam question stem from marking scheme
     region_index: int = 0  # 0-based OCR patch index (unique per row when keys repeat)
+    page_start: int = 1
+    page_end: int = 1
+    pages: List[int] = Field(default_factory=list)
     student_answer: str  # OCR after cleanup (used for grading)
     ocr_raw: str = ""  # original OCR before formatting
     awarded_marks: float
@@ -116,6 +137,7 @@ class EvaluateResponse(BaseModel):
     llm_model: str
     flags: List[str] = Field(default_factory=list)
     questions: List[QuestionResult]
+    created_at: Optional[str] = None
 
 
 class RubricBreakdownResponse(BaseModel):

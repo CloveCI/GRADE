@@ -375,11 +375,13 @@ CREATE TABLE IF NOT EXISTS public.sheets (
     filename TEXT NOT NULL,
     path TEXT NOT NULL,
     exam_id TEXT,
+    question_regions JSONB NOT NULL DEFAULT '[]'::jsonb,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 )
 """.strip(),
     "COMMENT ON TABLE public.sheets IS 'Scanned answer sheets; path is filesystem or storage URI resolved by the API'",
     "ALTER TABLE public.sheets ADD COLUMN IF NOT EXISTS exam_id TEXT",
+    "ALTER TABLE public.sheets ADD COLUMN IF NOT EXISTS question_regions JSONB NOT NULL DEFAULT '[]'::jsonb",
     """
 CREATE INDEX IF NOT EXISTS idx_sheets_exam_created
     ON public.sheets (exam_id, created_at DESC)
@@ -487,6 +489,50 @@ CREATE INDEX IF NOT EXISTS idx_rag_chunks_text_fts
     ON public.rag_chunks
     USING gin (to_tsvector('english', text_content))
 """.strip(),
+    """
+CREATE TABLE IF NOT EXISTS public.jobs (
+    id TEXT PRIMARY KEY,
+    job_type TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    progress INTEGER NOT NULL DEFAULT 0,
+    stage TEXT NOT NULL DEFAULT '',
+    payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+    result JSONB,
+    error TEXT,
+    user_id TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+)
+""".strip(),
+    """
+CREATE INDEX IF NOT EXISTS idx_jobs_status_updated
+    ON public.jobs (status, updated_at DESC)
+""".strip(),
+    """
+CREATE TABLE IF NOT EXISTS public.sheet_question_answers (
+    id TEXT PRIMARY KEY,
+    sheet_id TEXT NOT NULL REFERENCES public.sheets (id) ON DELETE CASCADE,
+    exam_id TEXT NOT NULL,
+    question_id TEXT NOT NULL,
+    question_index INTEGER NOT NULL,
+    region_index INTEGER NOT NULL,
+    page_start INTEGER NOT NULL,
+    page_end INTEGER NOT NULL,
+    pages JSONB NOT NULL DEFAULT '[]'::jsonb,
+    segments JSONB NOT NULL DEFAULT '[]'::jsonb,
+    raw_ocr_text TEXT NOT NULL DEFAULT '',
+    formatted_answer_text TEXT NOT NULL DEFAULT '',
+    format_flags JSONB NOT NULL DEFAULT '[]'::jsonb,
+    boundary_confidence DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT uq_sheet_question_answer UNIQUE (sheet_id, question_id, question_index)
+)
+""".strip(),
+    """
+CREATE INDEX IF NOT EXISTS idx_sheet_question_answers_sheet
+    ON public.sheet_question_answers (sheet_id, question_index ASC)
+""".strip(),
 ]
 
 
@@ -532,6 +578,9 @@ def get_sheet(sheet_id: str) -> Optional[Dict[str, Any]]:
     if not row:
         return None
     d = dict(row)
+    d["question_regions"] = _coerce_json_field(d.get("question_regions") or [])
+    if not isinstance(d["question_regions"], list):
+        d["question_regions"] = []
     if d.get("created_at") is not None:
         d["created_at"] = str(d["created_at"])
     return d
@@ -550,7 +599,7 @@ def list_sheets(
             if exam_id:
                 _pg_execute(cur,
                     """
-                    SELECT id, filename, path, exam_id, created_at
+                    SELECT id, filename, path, exam_id, question_regions, created_at
                     FROM public.sheets
                     WHERE exam_id = %s
                     ORDER BY created_at DESC
@@ -561,7 +610,7 @@ def list_sheets(
             else:
                 _pg_execute(cur,
                     """
-                    SELECT id, filename, path, exam_id, created_at
+                    SELECT id, filename, path, exam_id, question_regions, created_at
                     FROM public.sheets
                     ORDER BY created_at DESC
                     LIMIT %s OFFSET %s
@@ -572,8 +621,101 @@ def list_sheets(
     out: List[Dict[str, Any]] = []
     for row in rows:
         d = dict(row)
+        d["question_regions"] = _coerce_json_field(d.get("question_regions") or [])
+        if not isinstance(d["question_regions"], list):
+            d["question_regions"] = []
         if d.get("created_at") is not None:
             d["created_at"] = str(d["created_at"])
+        out.append(d)
+    return out
+
+
+def update_sheet_question_regions(sheet_id: str, question_regions: List[Dict[str, Any]]) -> None:
+    with _pg_connect(row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            _pg_execute(
+                cur,
+                "UPDATE public.sheets SET question_regions = %s WHERE id = %s",
+                (Json(question_regions or []), sheet_id),
+            )
+        conn.commit()
+
+
+def upsert_sheet_question_answers(
+    sheet_id: str,
+    exam_id: str,
+    rows: List[Dict[str, Any]],
+) -> int:
+    try:
+        with _pg_connect(row_factory=dict_row) as conn:
+            with conn.cursor() as cur:
+                _pg_execute(cur, "DELETE FROM public.sheet_question_answers WHERE sheet_id = %s", (sheet_id,))
+                for item in rows:
+                    _pg_execute(
+                        cur,
+                        """
+                        INSERT INTO public.sheet_question_answers (
+                            id, sheet_id, exam_id, question_id, question_index, region_index,
+                            page_start, page_end, pages, segments, raw_ocr_text, formatted_answer_text,
+                            format_flags, boundary_confidence, updated_at
+                        ) VALUES (
+                            %s, %s, %s, %s, %s, %s,
+                            %s, %s, %s, %s, %s, %s,
+                            %s, %s, NOW()
+                        )
+                        """,
+                        (
+                            str(item.get("id") or uuid.uuid4()),
+                            sheet_id,
+                            exam_id,
+                            str(item.get("question_id") or ""),
+                            int(item.get("question_index") or 0),
+                            int(item.get("region_index") or 0),
+                            int(item.get("page_start") or 1),
+                            int(item.get("page_end") or 1),
+                            Json(item.get("pages") or []),
+                            Json(item.get("segments") or []),
+                            str(item.get("raw_ocr_text") or ""),
+                            str(item.get("formatted_answer_text") or ""),
+                            Json(item.get("format_flags") or []),
+                            float(item.get("boundary_confidence") or 0.0),
+                        ),
+                    )
+            conn.commit()
+    except psycopg.Error as e:
+        if "sheet_question_answers" in str(e).lower() and "does not exist" in str(e).lower():
+            return 0
+        raise
+    return len(rows)
+
+
+def list_sheet_question_answers(sheet_id: str) -> List[Dict[str, Any]]:
+    try:
+        with _pg_connect(row_factory=dict_row) as conn:
+            with conn.cursor() as cur:
+                _pg_execute(
+                    cur,
+                    """
+                    SELECT * FROM public.sheet_question_answers
+                    WHERE sheet_id = %s
+                    ORDER BY question_index ASC
+                    """,
+                    (sheet_id,),
+                )
+                rows = cur.fetchall()
+    except psycopg.Error as e:
+        if "sheet_question_answers" in str(e).lower() and "does not exist" in str(e).lower():
+            return []
+        raise
+    out: List[Dict[str, Any]] = []
+    for row in rows:
+        d = dict(row)
+        d["pages"] = _coerce_json_field(d.get("pages") or [])
+        d["segments"] = _coerce_json_field(d.get("segments") or [])
+        d["format_flags"] = _coerce_json_field(d.get("format_flags") or [])
+        for k in ("created_at", "updated_at"):
+            if d.get(k) is not None:
+                d[k] = str(d[k])
         out.append(d)
     return out
 
@@ -767,6 +909,30 @@ def list_answer_keys(exam_id: str) -> List[Dict[str, Any]]:
     return out
 
 
+def list_answer_key_prompts(exam_id: str) -> List[Dict[str, str]]:
+    """Lightweight question stems for UI (no embeddings)."""
+    with _pg_connect(row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            _pg_execute(
+                cur,
+                """
+                SELECT question_id, expected_answer
+                FROM public.answer_keys
+                WHERE exam_id = %s
+                ORDER BY sort_order ASC, question_id ASC
+                """,
+                (exam_id,),
+            )
+            rows = cur.fetchall()
+    return [
+        {
+            "question_id": str(row["question_id"]),
+            "expected_answer": str(row.get("expected_answer") or ""),
+        }
+        for row in rows
+    ]
+
+
 def next_answer_key_sort_order_start(exam_id: str) -> int:
     with _pg_connect(row_factory=dict_row) as conn:
         with conn.cursor() as cur:
@@ -833,6 +999,139 @@ def get_result(result_id: str) -> Optional[Dict[str, Any]]:
     if d.get("created_at") is not None:
         d["created_at"] = str(d["created_at"])
     return d
+
+
+def get_exam_key_stats(exam_id: str) -> Dict[str, Any]:
+    with _pg_connect(row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            _pg_execute(
+                cur,
+                """
+                SELECT COUNT(*) AS key_count, MAX(created_at) AS keys_latest_at
+                FROM public.answer_keys WHERE exam_id = %s
+                """,
+                (exam_id,),
+            )
+            row = cur.fetchone()
+    if not row:
+        return {"key_count": 0, "keys_latest_at": None}
+    d = dict(row)
+    if d.get("keys_latest_at") is not None:
+        d["keys_latest_at"] = str(d["keys_latest_at"])
+    d["key_count"] = int(d.get("key_count") or 0)
+    return d
+
+
+def create_job(job_type: str, payload: Dict[str, Any], user_id: Optional[str] = None) -> str:
+    job_id = str(uuid.uuid4())
+    with _pg_connect(row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            _pg_execute(
+                cur,
+                """
+                INSERT INTO public.jobs (id, job_type, status, progress, stage, payload, user_id)
+                VALUES (%s, %s, 'pending', 0, '', %s, %s)
+                """,
+                (job_id, job_type, Json(payload), user_id),
+            )
+        conn.commit()
+    return job_id
+
+
+def update_job(
+    job_id: str,
+    *,
+    status: Optional[str] = None,
+    progress: Optional[int] = None,
+    stage: Optional[str] = None,
+    result: Optional[Dict[str, Any]] = None,
+    error: Optional[str] = None,
+) -> None:
+    fields: List[str] = ["updated_at = NOW()"]
+    args: List[Any] = []
+    if status is not None:
+        fields.append("status = %s")
+        args.append(status)
+    if progress is not None:
+        fields.append("progress = %s")
+        args.append(int(progress))
+    if stage is not None:
+        fields.append("stage = %s")
+        args.append(stage)
+    if result is not None:
+        fields.append("result = %s")
+        args.append(Json(result))
+    if error is not None:
+        fields.append("error = %s")
+        args.append(error)
+    args.append(job_id)
+    sql = f"UPDATE public.jobs SET {', '.join(fields)} WHERE id = %s"
+    with _pg_connect(row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            _pg_execute(cur, sql, tuple(args))
+        conn.commit()
+
+
+def get_job(job_id: str) -> Optional[Dict[str, Any]]:
+    with _pg_connect(row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            _pg_execute(cur, "SELECT * FROM public.jobs WHERE id = %s", (job_id,))
+            row = cur.fetchone()
+    if not row:
+        return None
+    d = dict(row)
+    d["payload"] = _coerce_json_field(d.get("payload") or {})
+    if d.get("result") is not None:
+        d["result"] = _coerce_json_field(d["result"])
+    for k in ("created_at", "updated_at"):
+        if d.get(k) is not None:
+            d[k] = str(d[k])
+    return d
+
+
+def update_evaluation_question(
+    result_id: str,
+    region_index: int,
+    *,
+    awarded_marks: float,
+    feedback: Optional[str] = None,
+) -> Dict[str, Any]:
+    row = get_result(result_id)
+    if not row:
+        raise ValueError("result_id not found")
+    questions = list(row["questions"])
+    updated = False
+    for q in questions:
+        if int(q.get("region_index", -1)) == int(region_index):
+            q["awarded_marks"] = float(awarded_marks)
+            if feedback is not None:
+                q["feedback"] = feedback
+            flags = list(q.get("flags") or [])
+            if "human_override" not in flags:
+                flags.append("human_override")
+            q["flags"] = flags
+            updated = True
+            break
+    if not updated:
+        raise ValueError("region_index not found")
+    total_marks = round(sum(float(q.get("awarded_marks") or 0) for q in questions), 1)
+    max_total = round(sum(float(q.get("max_marks") or 0) for q in questions), 1)
+    flags = list(row.get("flags") or [])
+    if "human_override" not in flags:
+        flags.append("human_override")
+    with _pg_connect(row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            _pg_execute(
+                cur,
+                """
+                UPDATE public.evaluation_results
+                SET per_question_scores = %s, total_marks = %s, max_total = %s, flags = %s
+                WHERE id = %s
+                """,
+                (Json(questions), total_marks, max_total, Json(flags), result_id),
+            )
+        conn.commit()
+    return get_result(result_id) or {}
 
 
 def list_results(

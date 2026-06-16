@@ -10,9 +10,10 @@ Reference: [6] G. Bradski, "The OpenCV Library," Dr. Dobb's Journal, 2000.
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, List, Tuple, Union
+from typing import Any, List, Optional, Tuple, Union
 
 import cv2
 import numpy as np
@@ -21,6 +22,48 @@ logger = logging.getLogger(__name__)
 
 # Defaults for OCR input normalisation (opencv proposal: 384×384)
 PATCH_SIZE = 384
+
+
+def preprocess_options_from_env() -> dict:
+    """Patch size, PDF zoom, segmentation padding, optional full-page OCR."""
+    patch_size = PATCH_SIZE
+    raw_ps = os.environ.get("GRADE_OCR_PATCH_SIZE", "").strip()
+    if raw_ps:
+        try:
+            patch_size = max(128, min(2048, int(raw_ps)))
+        except ValueError:
+            pass
+    pdf_render_scale = 3.0
+    raw_z = os.environ.get("GRADE_PDF_RENDER_SCALE", "").strip()
+    if raw_z:
+        try:
+            pdf_render_scale = max(1.0, min(6.0, float(raw_z)))
+        except ValueError:
+            pass
+    full_page = os.environ.get("GRADE_OCR_FULL_PAGE", "").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+    bbox_padding_frac = 0.04
+    raw_pf = os.environ.get("GRADE_OCR_BBOX_PADDING_FRAC", "").strip()
+    if raw_pf:
+        try:
+            bbox_padding_frac = max(0.0, min(0.2, float(raw_pf)))
+        except ValueError:
+            pass
+    bbox_padding_px_min = 16
+    raw_pm = os.environ.get("GRADE_OCR_BBOX_PADDING_PX_MIN", "").strip()
+    if raw_pm:
+        try:
+            bbox_padding_px_min = max(0, min(120, int(raw_pm)))
+        except ValueError:
+            pass
+    return {
+        "patch_size": patch_size,
+        "pdf_render_scale": pdf_render_scale,
+        "full_page": full_page,
+        "bbox_padding_frac": bbox_padding_frac,
+        "bbox_padding_px_min": bbox_padding_px_min,
+    }
 
 
 def load_bgr_from_path(
@@ -83,11 +126,12 @@ MAX_ASPECT_RATIO = 5.0
 class PreprocessResult:
     """Result of full preprocessing pipeline: patches and their bounding boxes."""
 
-    patches: List[np.ndarray]  # List of 384×384 grayscale patches
+    patches: List[np.ndarray]  # List of 384×384 grayscale patches (one per answer key)
     bboxes: List[Tuple[int, int, int, int]]  # (x, y, w, h) per patch, on original image
     region_ids: List[str]  # Stable ordered ids: R1, R2, ...
     used_fallback_grid: bool  # True if contour count was wrong and grid fallback was used
     diagnostics: dict  # Lightweight debug/trace metadata
+    ocr_patch_groups: Optional[List[List[np.ndarray]]] = None  # per-key OCR inputs (multi-strip)
 
 
 def ingest(
@@ -304,21 +348,126 @@ def segment(
     return patches, bboxes, used_fallback
 
 
+def _row_ink_density(gray: np.ndarray) -> np.ndarray:
+    """Per-row ink amount (higher = more handwriting)."""
+    if gray.ndim == 3:
+        gray = cv2.cvtColor(gray, cv2.COLOR_BGR2GRAY)
+    _, inv = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    row = inv.sum(axis=1).astype(np.float64)
+    k = 21
+    return np.convolve(row, np.ones(k) / k, mode="same")
+
+
+def _horizontal_split_bounds(
+    h: int,
+    num_rows: int,
+    row_density: np.ndarray,
+    *,
+    top_frac: float = 0.06,
+    bottom_frac: float = 0.06,
+) -> List[int]:
+    """Y boundaries for ``num_rows`` strips, snapping splits to low-ink valleys."""
+    if num_rows < 1:
+        return [0, h]
+    y_top = int(h * top_frac)
+    y_bot = int(h * (1.0 - bottom_frac))
+    if y_bot <= y_top + 40:
+        y_top, y_bot = 0, h
+    if num_rows == 1:
+        return [y_top, y_bot]
+
+    bounds = [y_top]
+    content_h = y_bot - y_top
+
+    if num_rows == 2:
+        # Two answers per page — pick the whitespace valley closest to mid-page (not the
+        # deepest valley, which may be *within* a multi-part answer on the lower strip).
+        ideal = y_top + content_h // 2
+        search_lo = int(y_top + content_h * 0.28)
+        search_hi = int(y_top + content_h * 0.72)
+        candidates: List[Tuple[int, float, int]] = []
+        for i in range(search_lo + 8, search_hi - 8):
+            if row_density[i] <= row_density[i - 1] and row_density[i] <= row_density[i + 1]:
+                candidates.append((i, float(row_density[i]), abs(i - ideal)))
+        split = ideal
+        if candidates:
+            candidates.sort(key=lambda c: (c[2], c[1]))
+            split = candidates[0][0]
+        bounds.extend([split, y_bot])
+        for i in range(1, len(bounds)):
+            bounds[i] = max(bounds[i], bounds[i - 1] + 8)
+        bounds[-1] = min(h, bounds[-1])
+        return bounds
+
+    window = max(24, int(content_h * 0.10))
+    for i in range(1, num_rows):
+        ideal = y_top + int(content_h * i / num_rows)
+        lo = max(y_top + 16, ideal - window)
+        hi = min(y_bot - 16, ideal + window)
+        if hi <= lo:
+            bounds.append(ideal)
+            continue
+        band = row_density[lo:hi]
+        best = lo + int(np.argmin(band))
+        bounds.append(best)
+    bounds.append(y_bot)
+    # enforce monotonic splits
+    for i in range(1, len(bounds)):
+        bounds[i] = max(bounds[i], bounds[i - 1] + 8)
+    bounds[-1] = min(h, bounds[-1])
+    return bounds
+
+
 def _segment_grid_fallback(
     image: np.ndarray, num_rows: int
 ) -> Tuple[List[np.ndarray], List[Tuple[int, int, int, int]]]:
-    """Fallback: split image into num_rows equal horizontal strips."""
+    """Split image into horizontal strips; boundaries follow whitespace valleys when possible."""
     h, w = image.shape[:2]
-    patches = []
-    bboxes = []
-    step = h // num_rows
+    density = _row_ink_density(image)
+    bounds = _horizontal_split_bounds(h, num_rows, density)
+    patches: List[np.ndarray] = []
+    bboxes: List[Tuple[int, int, int, int]] = []
     for i in range(num_rows):
-        y1 = i * step
-        y2 = (h - 1) if i == num_rows - 1 else (i + 1) * step
+        y1 = bounds[i]
+        y2 = bounds[i + 1] if i + 1 < len(bounds) else h
+        if y2 <= y1:
+            continue
         patch = image[y1:y2, :]
         patches.append(patch)
         bboxes.append((0, y1, w, y2 - y1))
     return patches, bboxes
+
+
+def _stitch_patches_vertical(patches: List[np.ndarray]) -> np.ndarray:
+    """Stack grayscale patches top-to-bottom for multi-page / multi-strip answers."""
+    if not patches:
+        return np.zeros((1, 1), dtype=np.uint8)
+    if len(patches) == 1:
+        p = patches[0]
+        return p if p.ndim == 2 else cv2.cvtColor(p, cv2.COLOR_BGR2GRAY)
+    normed: List[np.ndarray] = []
+    max_w = 0
+    for p in patches:
+        g = p if p.ndim == 2 else cv2.cvtColor(p, cv2.COLOR_BGR2GRAY)
+        normed.append(g)
+        max_w = max(max_w, g.shape[1])
+    total_h = sum(g.shape[0] for g in normed)
+    canvas = np.full((total_h, max_w), 255, dtype=np.uint8)
+    y = 0
+    for g in normed:
+        canvas[y : y + g.shape[0], : g.shape[1]] = g
+        y += g.shape[0]
+    return canvas
+
+
+def _merge_bboxes(bboxes: List[Tuple[int, int, int, int]]) -> Tuple[int, int, int, int]:
+    if not bboxes:
+        return (0, 0, 0, 0)
+    x0 = min(b[0] for b in bboxes)
+    y0 = min(b[1] for b in bboxes)
+    x1 = max(b[0] + b[2] for b in bboxes)
+    y1 = max(b[1] + b[3] for b in bboxes)
+    return (x0, y0, x1 - x0, y1 - y0)
 
 
 def preprocess_patch(
@@ -350,6 +499,54 @@ def preprocess_patch(
     return resized
 
 
+def _extract_raw_regions(
+    image_input: Union[str, Path, np.ndarray],
+    *,
+    expected_num_regions: int | None = None,
+    do_deskew: bool = True,
+    pdf_page_index: int = 0,
+    pdf_render_scale: float = 3.0,
+    full_page: bool = False,
+    bbox_padding_frac: float = 0.04,
+    bbox_padding_px_min: int = 16,
+) -> Tuple[List[np.ndarray], List[Tuple[int, int, int, int]], bool]:
+    """Load one page/sheet and return raw grayscale region crops (before 384 resize)."""
+    if isinstance(image_input, (str, Path)):
+        p = Path(image_input)
+        orig = (
+            load_bgr_from_path(
+                image_input,
+                pdf_page_index=pdf_page_index,
+                pdf_render_scale=pdf_render_scale,
+            )
+            if p.suffix.lower() == ".pdf"
+            else load_bgr_from_path(image_input)
+        )
+        ingest(orig, do_deskew=do_deskew)
+    else:
+        orig = (
+            cv2.cvtColor(image_input, cv2.COLOR_GRAY2BGR)
+            if image_input.ndim == 2
+            else image_input
+        )
+    orig_gray = cv2.cvtColor(orig, cv2.COLOR_BGR2GRAY)
+    if do_deskew:
+        orig_gray = _deskew(orig_gray)
+    if full_page:
+        gh, gw = orig_gray.shape[:2]
+        return [orig_gray], [(0, 0, gw, gh)], False
+    if expected_num_regions is not None and expected_num_regions >= 1:
+        patches_raw, bboxes = _segment_grid_fallback(orig_gray, expected_num_regions)
+        return patches_raw, bboxes, True
+    patches_raw, bboxes, used_fallback = segment(
+        orig_gray,
+        expected_num_regions=expected_num_regions,
+        bbox_padding_frac=bbox_padding_frac,
+        bbox_padding_px_min=bbox_padding_px_min,
+    )
+    return patches_raw, bboxes, used_fallback
+
+
 def preprocess_pipeline(
     image_input: Union[str, Path, np.ndarray],
     *,
@@ -379,40 +576,16 @@ def preprocess_pipeline(
     Returns:
         PreprocessResult with list of size×size patches, bboxes, and fallback flag.
     """
-    if isinstance(image_input, (str, Path)):
-        p = Path(image_input)
-        orig = (
-            load_bgr_from_path(
-                image_input,
-                pdf_page_index=pdf_page_index,
-                pdf_render_scale=pdf_render_scale,
-            )
-            if p.suffix.lower() == ".pdf"
-            else load_bgr_from_path(image_input)
-        )
-        thresh = ingest(orig, do_deskew=do_deskew)
-    else:
-        thresh = ingest(image_input, do_deskew=do_deskew)
-        orig = (
-            cv2.cvtColor(image_input, cv2.COLOR_GRAY2BGR)
-            if image_input.ndim == 2
-            else image_input
-        )
-    orig_gray = cv2.cvtColor(orig, cv2.COLOR_BGR2GRAY)
-    if do_deskew:
-        orig_gray = _deskew(orig_gray)
-    if full_page:
-        gh, gw = orig_gray.shape[:2]
-        patches_raw = [orig_gray]
-        bboxes = [(0, 0, gw, gh)]
-        used_fallback = False
-    else:
-        patches_raw, bboxes, used_fallback = segment(
-            orig_gray,
-            expected_num_regions=expected_num_regions,
-            bbox_padding_frac=bbox_padding_frac,
-            bbox_padding_px_min=bbox_padding_px_min,
-        )
+    patches_raw, bboxes, used_fallback = _extract_raw_regions(
+        image_input,
+        expected_num_regions=expected_num_regions,
+        do_deskew=do_deskew,
+        pdf_page_index=pdf_page_index,
+        pdf_render_scale=pdf_render_scale,
+        full_page=full_page,
+        bbox_padding_frac=bbox_padding_frac,
+        bbox_padding_px_min=bbox_padding_px_min,
+    )
     patches_384 = [preprocess_patch(p, size=patch_size) for p in patches_raw]
     region_ids = [f"R{i+1}" for i in range(len(patches_384))]
     return PreprocessResult(
@@ -437,6 +610,38 @@ def preprocess_pipeline(
     )
 
 
+def _apply_key_region_groups(
+    raw_patches: List[np.ndarray],
+    bboxes: List[Tuple[int, int, int, int]],
+    region_ids: List[str],
+    groups: List[List[int]],
+    *,
+    patch_size: int = PATCH_SIZE,
+) -> Tuple[
+    List[np.ndarray],
+    List[Tuple[int, int, int, int]],
+    List[str],
+    List[List[np.ndarray]],
+]:
+    """Merge raw strips per answer key; keep high-res OCR strips per key."""
+    out_patches: List[np.ndarray] = []
+    out_bboxes: List[Tuple[int, int, int, int]] = []
+    out_ids: List[str] = []
+    ocr_groups: List[List[np.ndarray]] = []
+    for gi, grp in enumerate(groups):
+        parts = [raw_patches[i] for i in grp if i < len(raw_patches)]
+        if not parts:
+            continue
+        # Keep OCR groups in original high-resolution grayscale to avoid square-resize
+        # distortion on handwriting (especially long text lines).
+        ocr_groups.append(parts)
+        out_patches.append(preprocess_patch(parts[0], size=patch_size))
+        out_bboxes.append(_merge_bboxes([bboxes[i] for i in grp if i < len(bboxes)]))
+        ids = [region_ids[i] for i in grp if i < len(region_ids)]
+        out_ids.append(ids[0] if len(ids) == 1 else "+".join(ids))
+    return out_patches, out_bboxes, out_ids, ocr_groups
+
+
 def pdf_page_count(image_input: Union[str, Path]) -> int:
     """Number of pages in a PDF, or 1 for raster images."""
     path = Path(image_input)
@@ -456,21 +661,26 @@ def pdf_page_count(image_input: Union[str, Path]) -> int:
 def preprocess_sheet_for_evaluation(
     image_input: Union[str, Path],
     *,
+    exam_id: str = "",
     num_answer_keys: int = 0,
     expected_num_regions: int | None = None,
+    regions_per_page: List[int] | None = None,
     **pipeline_kwargs: Any,
 ) -> PreprocessResult:
     """
     Collect OCR patches for an answer sheet (all PDF pages).
 
-    When ``num_answer_keys`` equals PDF page count, uses one full-page region per page
-    so patch 1 lines up with key Q1, etc. Otherwise uses ``expected_num_regions`` or
-    ``num_answer_keys`` on single-page sheets.
+    When ``regions_per_page`` is set (e.g. ``[2, 2, 1, 1, 1]`` for CIE DM sheets), each PDF page
+    gets that many horizontal strips. Optional per-exam key groups merge raw strips (e.g. Q4 on two pages).
     """
+    from autograder.exam_layouts import key_region_groups
+
     path = Path(image_input)
     pages = pdf_page_count(path)
+    patch_size = int(pipeline_kwargs.get("patch_size") or PATCH_SIZE)
+    groups = key_region_groups(exam_id, num_answer_keys)
 
-    if pages == 1:
+    if pages == 1 and not groups:
         exp = expected_num_regions
         if exp is None and num_answer_keys > 0:
             exp = num_answer_keys
@@ -481,46 +691,127 @@ def preprocess_sheet_for_evaluation(
         )
 
     one_per_page = num_answer_keys > 0 and pages == num_answer_keys
-    # Multi-page sheets: default to one full-page OCR region per page (matches sheet RAG ingest).
-    default_full_page_per_pdf_page = pages > 1 and expected_num_regions is None
-    all_patches: List[np.ndarray] = []
+    default_full_page_per_pdf_page = (
+        pages > 1 and expected_num_regions is None and not regions_per_page
+    )
+    raw_patches: List[np.ndarray] = []
     all_bboxes: List[Tuple[int, int, int, int]] = []
     all_region_ids: List[str] = []
+    raw_segments: List[dict] = []
     used_fallback = False
     page_meta: List[dict] = []
 
     for page_idx in range(pages):
         kw = dict(pipeline_kwargs)
-        if one_per_page or default_full_page_per_pdf_page:
+        if regions_per_page:
+            if page_idx >= len(regions_per_page):
+                page_meta.append({"page": page_idx + 1, "regions": 0, "skipped": True})
+                continue
+            page_expected = int(regions_per_page[page_idx])
+            if page_expected < 1:
+                page_meta.append({"page": page_idx + 1, "regions": 0, "skipped": True})
+                continue
+            kw["full_page"] = False
+        elif one_per_page or default_full_page_per_pdf_page:
             kw["full_page"] = True
-            page_expected: int | None = 1
+            page_expected = 1
         else:
-            page_expected = expected_num_regions
-        pp = preprocess_pipeline(
+            kw["full_page"] = True
+            page_expected = 1
+        page_raw, page_bboxes, page_fallback = _extract_raw_regions(
             image_input,
             expected_num_regions=page_expected,
             pdf_page_index=page_idx,
-            **kw,
+            do_deskew=kw.get("do_deskew", True),
+            pdf_render_scale=float(kw.get("pdf_render_scale") or 3.0),
+            full_page=bool(kw.get("full_page")),
+            bbox_padding_frac=float(kw.get("bbox_padding_frac") or 0.04),
+            bbox_padding_px_min=int(kw.get("bbox_padding_px_min") or 16),
         )
-        used_fallback = used_fallback or pp.used_fallback_grid
-        page_meta.append({"page": page_idx + 1, "regions": len(pp.patches)})
-        for i, rid in enumerate(pp.region_ids):
+        used_fallback = used_fallback or page_fallback
+        page_meta.append({"page": page_idx + 1, "regions": len(page_raw)})
+        for i, _ in enumerate(page_raw):
             prefix = f"P{page_idx + 1}_"
-            all_region_ids.append(f"{prefix}{rid}" if not rid.startswith("P") else rid)
-            all_patches.append(pp.patches[i])
-            all_bboxes.append(pp.bboxes[i])
+            rid = f"{prefix}R{i + 1}"
+            all_region_ids.append(rid)
+            raw_patches.append(page_raw[i])
+            all_bboxes.append(page_bboxes[i])
+            x, y, w, h = page_bboxes[i]
+            raw_segments.append(
+                {
+                    "raw_region_index": len(raw_segments),
+                    "region_id": rid,
+                    "page": page_idx + 1,
+                    "bbox": [x, y, w, h],
+                    "x_start": x,
+                    "x_end": x + w,
+                    "y_start": y,
+                    "y_end": y + h,
+                }
+            )
+
+    if groups and raw_patches:
+        all_patches, all_bboxes, all_region_ids, ocr_groups = _apply_key_region_groups(
+            raw_patches,
+            all_bboxes,
+            all_region_ids,
+            groups,
+            patch_size=patch_size,
+        )
+    else:
+        all_patches = [preprocess_patch(p, size=patch_size) for p in raw_patches]
+        # OCR on raw strips yields better fidelity than resized 384x384 patches.
+        ocr_groups = [[p] for p in raw_patches]
+
+    question_regions: List[dict] = []
+    if groups:
+        for q_idx, grp in enumerate(groups):
+            segs = [raw_segments[i] for i in grp if i < len(raw_segments)]
+            if not segs:
+                continue
+            pages_for_q = sorted({int(s["page"]) for s in segs})
+            question_regions.append(
+                {
+                    "question_index": q_idx,
+                    "region_index": q_idx,
+                    "raw_region_indices": [int(s["raw_region_index"]) for s in segs],
+                    "region_ids": [str(s["region_id"]) for s in segs],
+                    "page_start": pages_for_q[0],
+                    "page_end": pages_for_q[-1],
+                    "pages": pages_for_q,
+                    "segments": segs,
+                }
+            )
+    else:
+        for q_idx, seg in enumerate(raw_segments[: len(all_patches)]):
+            question_regions.append(
+                {
+                    "question_index": q_idx,
+                    "region_index": q_idx,
+                    "raw_region_indices": [int(seg["raw_region_index"])],
+                    "region_ids": [str(seg["region_id"])],
+                    "page_start": int(seg["page"]),
+                    "page_end": int(seg["page"]),
+                    "pages": [int(seg["page"])],
+                    "segments": [seg],
+                }
+            )
 
     return PreprocessResult(
         patches=all_patches,
         bboxes=all_bboxes,
         region_ids=all_region_ids,
         used_fallback_grid=used_fallback,
+        ocr_patch_groups=ocr_groups,
         diagnostics={
             "num_regions": len(all_patches),
             "pdf_pages": pages,
             "one_region_per_page": one_per_page or default_full_page_per_pdf_page,
             "num_answer_keys": num_answer_keys,
             "expected_num_regions": expected_num_regions,
+            "regions_per_page": regions_per_page,
+            "key_region_groups": groups,
+            "question_regions": question_regions,
             "pages": page_meta,
         },
     )

@@ -9,18 +9,24 @@ from __future__ import annotations
 import logging
 import os
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
+
+ProgressCallback = Callable[[int, int], None]
 
 from autograder.db import (
     delete_rag_chunks_for_document,
     get_rag_chunks_for_sheet,
     get_sheet,
     list_answer_keys,
+    list_sheet_question_answers,
+    update_sheet_question_regions,
+    upsert_sheet_question_answers,
     upsert_rag_chunks_batch,
 )
+from autograder.exam_layouts import resolve_regions_per_page
 from autograder.embeddings import embed_texts_batch
 from autograder.ocr import ocr_patch
-from autograder.preprocessing import preprocess_pipeline
+from autograder.preprocessing import preprocess_options_from_env, preprocess_sheet_for_evaluation
 from autograder.rag_extract import build_rag_payload, rag_rows_for_postgres
 
 logger = logging.getLogger(__name__)
@@ -172,6 +178,7 @@ def ingest_sheet_rag(
     expected_num_regions: Optional[int] = None,
     regions_per_page: Optional[List[int]] = None,
     full_page: Optional[bool] = None,
+    progress_callback: Optional[ProgressCallback] = None,
 ) -> Dict[str, Any]:
     """
     OCR + chunk + embed an uploaded sheet and upsert into ``rag_chunks``.
@@ -187,7 +194,8 @@ def ingest_sheet_rag(
         return {"status": "error", "reason": "file_missing", "path": str(path)}
 
     document_id = sheet_document_id(sheet_id)
-    exam_id = row.get("exam_id")
+    exam_id = str(row.get("exam_id") or "")
+    keys = list_answer_keys(exam_id) if exam_id else []
 
     if not force:
         existing = get_rag_chunks_for_sheet(sheet_id, limit=1)
@@ -201,62 +209,102 @@ def ingest_sheet_rag(
 
     delete_rag_chunks_for_document(document_id)
 
-    use_full_page = full_page
-    if regions_per_page:
-        use_full_page = False
-    elif use_full_page is None:
-        use_full_page = _preprocess_options_from_env().get("full_page", True)
+    layout = resolve_regions_per_page(
+        exam_id,
+        regions_per_page=regions_per_page,
+        num_keys=len(keys),
+    )
+    pp = preprocess_sheet_for_evaluation(
+        path,
+        exam_id=exam_id,
+        num_answer_keys=len(keys),
+        expected_num_regions=expected_num_regions,
+        regions_per_page=layout,
+        **_preprocess_options_from_env(),
+    )
+    preprocess_meta: Dict[str, Any] = {
+        "pages": pp.diagnostics.get("pages") or [],
+        "regions_per_page": layout,
+        "key_region_groups": pp.diagnostics.get("key_region_groups"),
+    }
 
-    is_pdf = path.suffix.lower() == ".pdf"
-    page_count = _pdf_page_count(path) if is_pdf else 1
-
-    all_regions: List[Dict[str, Any]] = []
-    preprocess_meta: Dict[str, Any] = {"pages": [], "regions_per_page": regions_per_page}
-
-    for page_idx in range(page_count):
-        page_expected = expected_num_regions
-        page_full_page = bool(use_full_page)
-        if regions_per_page:
-            if page_idx >= len(regions_per_page):
-                preprocess_meta["pages"].append(
-                    {"page": page_idx + 1, "regions_found": 0, "skipped": True}
-                )
-                continue
-            page_expected = int(regions_per_page[page_idx])
-            if page_expected < 1:
-                preprocess_meta["pages"].append(
-                    {"page": page_idx + 1, "regions_found": 0, "skipped": True}
-                )
-                continue
-            page_full_page = False
-        pp = preprocess_pipeline(
-            path,
-            expected_num_regions=page_expected,
-            pdf_page_index=page_idx,
-            full_page=page_full_page,
-        )
-        preprocess_meta["pages"].append(
+    question_regions: List[Dict[str, Any]] = []
+    for item in pp.diagnostics.get("question_regions") or []:
+        qi = int(item.get("question_index") or 0)
+        key = keys[min(qi, len(keys) - 1)] if keys else {}
+        question_regions.append(
             {
-                "page": page_idx + 1,
-                "regions_found": len(pp.patches),
-                "fallback_grid": pp.used_fallback_grid,
-                "diagnostics": pp.diagnostics,
+                "question_id": str(key.get("question_id") or f"Q{qi + 1}"),
+                "question_index": qi,
+                "region_index": int(item.get("region_index") or qi),
+                "raw_region_indices": item.get("raw_region_indices") or [],
+                "region_ids": item.get("region_ids") or [],
+                "page_start": int(item.get("page_start") or 1),
+                "page_end": int(item.get("page_end") or 1),
+                "pages": item.get("pages") or [],
+                "segments": item.get("segments") or [],
             }
         )
-        for i, patch in enumerate(pp.patches):
-            ocr_res = ocr_patch(patch)
-            rid = pp.region_ids[i] if i < len(pp.region_ids) else f"R{i + 1}"
-            if page_count > 1:
-                rid = f"P{page_idx + 1}_{rid}"
-            all_regions.append(
-                {
-                    "region_id": rid,
-                    "text": ocr_res.text,
-                    "ocr_engine": ocr_res.engine,
-                    "ocr_confidence": ocr_res.confidence,
-                    "flags": list(ocr_res.flags or []),
-                }
-            )
+    if question_regions:
+        try:
+            update_sheet_question_regions(sheet_id, question_regions)
+        except Exception as e:
+            logger.warning("Could not persist sheet question regions for %s: %s", sheet_id, e)
+
+    all_regions: List[Dict[str, Any]] = []
+    answer_rows: List[Dict[str, Any]] = []
+    ocr_groups = pp.ocr_patch_groups or [[p] for p in pp.patches]
+    total_patches = len(pp.patches)
+    for i, patch in enumerate(pp.patches):
+        parts = ocr_groups[i] if i < len(ocr_groups) else [patch]
+        texts: List[str] = []
+        confs: List[float] = []
+        engines: List[str] = []
+        flags: List[str] = []
+        for part in parts:
+            ocr_res = ocr_patch(part)
+            engines.append(ocr_res.engine)
+            if (ocr_res.text or "").strip():
+                texts.append((ocr_res.text or "").strip())
+            confs.append(float(ocr_res.confidence))
+            flags.extend(ocr_res.flags or [])
+        rid = pp.region_ids[i] if i < len(pp.region_ids) else f"R{i + 1}"
+        all_regions.append(
+            {
+                "region_id": rid,
+                "text": "\n\n".join(texts),
+                "ocr_engine": ",".join(sorted(set(engines))),
+                "ocr_confidence": sum(confs) / len(confs) if confs else 0.0,
+                "flags": list(set(flags)),
+            }
+        )
+        key = keys[i] if i < len(keys) else {}
+        qr_item = next(
+            (
+                x
+                for x in question_regions
+                if int(x.get("question_index") or -1) == int(i)
+                or str(x.get("question_id") or "") == str(key.get("question_id") or "")
+            ),
+            None,
+        )
+        answer_rows.append(
+            {
+                "question_id": str(key.get("question_id") or f"Q{i+1}"),
+                "question_index": i,
+                "region_index": i,
+                "page_start": int((qr_item or {}).get("page_start") or 1),
+                "page_end": int((qr_item or {}).get("page_end") or 1),
+                "pages": (qr_item or {}).get("pages") or [],
+                "segments": (qr_item or {}).get("segments") or [],
+                "raw_ocr_text": "\n\n".join(texts),
+                "formatted_answer_text": "",
+                "format_flags": list(set(flags)),
+                "boundary_confidence": 0.85 if qr_item else 0.5,
+            }
+        )
+        if progress_callback:
+            progress_callback(i + 1, total_patches)
 
     if not all_regions:
         return {"status": "skipped", "reason": "no_regions", "sheet_id": sheet_id}
@@ -269,6 +317,26 @@ def ingest_sheet_rag(
         document_id=document_id,
     )
     rows = rag_rows_for_postgres(payload)
+    persisted_answers = list_sheet_question_answers(sheet_id)
+    if answer_rows and (force or not persisted_answers):
+        try:
+            upsert_sheet_question_answers(sheet_id, exam_id, answer_rows)
+            persisted_answers = list_sheet_question_answers(sheet_id)
+        except Exception as e:
+            logger.warning("Could not persist question answers for %s: %s", sheet_id, e)
+    rid_to_qid: Dict[str, str] = {}
+    qid_by_region: Dict[int, str] = {}
+    for i in range(len(pp.patches)):
+        rid = pp.region_ids[i] if i < len(pp.region_ids) else f"R{i + 1}"
+        key = keys[i] if i < len(keys) else {}
+        qid = str(key.get("question_id") or f"Q{i + 1}")
+        rid_to_qid[str(rid)] = qid
+        qid_by_region[i] = qid
+    for a in persisted_answers:
+        ri = int(a.get("region_index") or -1)
+        qid = str(a.get("question_id") or "")
+        if ri >= 0 and qid:
+            qid_by_region[ri] = qid
     for r in rows:
         meta = dict(r.get("meta") or {})
         meta["kind"] = "sheet"
@@ -276,6 +344,15 @@ def ingest_sheet_rag(
         meta["exam_id"] = exam_id
         meta["source_path"] = str(path.resolve())
         meta["document_id"] = document_id
+        rid = str(meta.get("region_id") or "")
+        qid = rid_to_qid.get(rid)
+        if not qid and rid.startswith("R"):
+            try:
+                qid = qid_by_region.get(int(rid[1:]) - 1)
+            except ValueError:
+                qid = None
+        if qid:
+            meta["question_id"] = qid
         r["meta"] = meta
 
     n = upsert_rag_chunks_batch(rows)
@@ -285,6 +362,6 @@ def ingest_sheet_rag(
         "sheet_id": sheet_id,
         "document_id": document_id,
         "chunks_saved": n,
-        "pages_processed": page_count,
+        "pages_processed": int(pp.diagnostics.get("pdf_pages") or 1),
         "regions_ocr": len(all_regions),
     }

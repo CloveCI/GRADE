@@ -34,11 +34,11 @@ def test_evaluate_pipeline_smoke(monkeypatch):
     )
     # fake sheet and keys
     monkeypatch.setattr(
-        "autograder.api.get_sheet",
+        "autograder.evaluation_service.get_sheet",
         lambda _id: {"id": _id, "path": "fake.png", "exam_id": "exam-1"},
     )
     monkeypatch.setattr(
-        "autograder.api.list_answer_keys",
+        "autograder.evaluation_service.list_answer_keys",
         lambda exam_id: [
             {
                 "question_id": "Q1",
@@ -64,7 +64,11 @@ def test_evaluate_pipeline_smoke(monkeypatch):
     from autograder.preprocessing import PreprocessResult
 
     monkeypatch.setattr(
-        "autograder.api.preprocess_sheet_for_evaluation",
+        "autograder.evaluation_service.list_results",
+        lambda **kwargs: [],
+    )
+    monkeypatch.setattr(
+        "autograder.evaluation_service.preprocess_sheet_for_evaluation",
         lambda *args, **kwargs: PreprocessResult(
             patches=[np.zeros((384, 384), dtype=np.uint8), np.zeros((384, 384), dtype=np.uint8)],
             bboxes=[(0, 0, 10, 10), (0, 10, 10, 10)],
@@ -73,12 +77,12 @@ def test_evaluate_pipeline_smoke(monkeypatch):
             diagnostics={"num_regions": 2, "patch_size": 384},
         ),
     )
-    monkeypatch.setattr("autograder.api.ocr_patch", lambda _patch: _FakeOCR())
+    monkeypatch.setattr("autograder.evaluation_service.ocr_patch", lambda _patch: _FakeOCR())
 
     from autograder.schemas import EvaluationResult, RubricScores
 
     monkeypatch.setattr(
-        "autograder.api.score_answer_llm",
+        "autograder.evaluation_service.score_answer_llm",
         lambda **kwargs: (
             EvaluationResult(
                 awarded_marks=3.0,
@@ -103,7 +107,19 @@ def test_evaluate_pipeline_smoke(monkeypatch):
         captured.update(payload)
         return str(uuid.uuid4())
 
-    monkeypatch.setattr("autograder.api.insert_evaluation_result", _insert)
+    monkeypatch.setattr("autograder.evaluation_service.insert_evaluation_result", _insert)
+    monkeypatch.setattr(
+        "autograder.evaluation_service.retrieve_context_for_grading",
+        lambda *args, **kwargs: {"context_text": "", "chunk_ids": []},
+    )
+    monkeypatch.setattr(
+        "autograder.evaluation_service.format_student_answer",
+        lambda raw, _key: type("F", (), {"formatted": raw, "flags": [], "method": "raw"})(),
+    )
+    monkeypatch.setattr(
+        "autograder.evaluation_service.question_text_by_id",
+        lambda _exam: {},
+    )
 
     req = EvaluateRequest(sheet_id="sheet-1", exam_id="exam-1")
     resp = evaluate(req)

@@ -1,10 +1,11 @@
-import { NavLink, useNavigate } from 'react-router-dom';
+import { NavLink, useNavigate, Link } from 'react-router-dom';
 
 const NAV = [
   { id: 'dashboard', label: 'Dashboard',  icon: 'dashboard',    to: '/dashboard'  },
-  { id: 'upload',    label: 'Processing', icon: 'cloud_upload',  to: '/upload'     },
-  { id: 'evaluator', label: 'Evaluator',  icon: 'visibility',   to: '/evaluator'  },
+  { id: 'upload',    label: 'Submit papers', icon: 'cloud_upload', to: '/processing' },
+  { id: 'evaluator', label: 'Review grades', icon: 'grading',      to: '/evaluator'  },
   { id: 'reports',   label: 'Reports',    icon: 'description',  to: '/reports'    },
+  { id: 'inspect',   label: 'Inspect',    icon: 'search',       to: '/inspect'    },
   { id: 'settings',  label: 'Settings',   icon: 'settings',     to: '/settings'   },
 ];
 
@@ -19,14 +20,14 @@ export default function Sidebar() {
         </div>
         <div className="sidebar-brand-text">
           <h1>GRADE</h1>
-          <p>Institutional Portal</p>
+          <p>Grading portal</p>
         </div>
       </div>
 
       <div style={{ padding: '0 1rem 0.75rem' }}>
-        <button className="sidebar-new-btn" onClick={() => navigate('/upload')}>
+        <button type="button" className="sidebar-new-btn" onClick={() => navigate('/processing')}>
           <span className="material-symbols-outlined" style={{ fontSize: '1rem' }}>add_circle</span>
-          New Evaluation
+          Grade papers
         </button>
       </div>
 
@@ -53,10 +54,10 @@ export default function Sidebar() {
       </nav>
 
       <div className="sidebar-footer">
-        <a href="#">
+        <Link to="/docs">
           <span className="material-symbols-outlined" style={{ fontSize: '1.125rem' }}>help</span>
-          Help Center
-        </a>
+          Help
+        </Link>
         <a href="#">
           <span className="material-symbols-outlined" style={{ fontSize: '1.125rem' }}>account_circle</span>
           Account

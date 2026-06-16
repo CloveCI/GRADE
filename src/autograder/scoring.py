@@ -30,6 +30,14 @@ def prompt_hash() -> str:
     return "sha256:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def aggregate_grading_confidence(conf_levels: List[str]) -> str:
+    if any(c == "low" for c in conf_levels):
+        return "low"
+    if any(c == "medium" for c in conf_levels):
+        return "medium"
+    return "high"
+
+
 def _legacy_fallback_score(student_answer: str, model_answer: str, max_marks: float) -> EvaluationResult:
     s_vec = embed_text_local(student_answer)
     m_vec = embed_text_local(model_answer)
