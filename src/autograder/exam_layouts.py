@@ -14,6 +14,8 @@ EXAM_REGIONS_PER_PAGE: dict[str, List[int]] = {
     "cie-daa": [3, 1, 2, 1],
     # DATA MINING.pdf: P1=Q1+Q2, P2=Q3+Q4a, P3=Q4b, P4=Q5, P5=Q6 (7 raw strips → 6 keys).
     "cie-dm": [2, 2, 1, 1, 1],
+    # COMPILER DESIGN.pdf: P1=Q1–Q3, P2=Q4, P3=Q5, P4=Q6+Q7 (7 questions, 4 pages).
+    "cie-compiler": [3, 1, 1, 2],
 }
 
 DEFAULT_SIX_QUESTION_LAYOUT: List[int] = [3, 1, 2, 1]
@@ -22,6 +24,11 @@ DEFAULT_SIX_QUESTION_LAYOUT: List[int] = [3, 1, 2, 1]
 EXAM_LAYOUT_ALIASES: dict[str, str] = {
     "daa": "cie-daa",
     "daa1": "cie-daa",
+    "compiler": "cie-compiler",
+    "compiler-design": "cie-compiler",
+    "cie-cd": "cie-compiler",
+    # Uploaded as exam id "ml" but keys/sheets are Compiler Design.
+    "ml": "cie-compiler",
 }
 
 # exam_id -> groups of raw 0-based region indices merged into each answer key (in key order).
@@ -74,6 +81,8 @@ def sheet_layout_preset(exam_id: str) -> Optional[List[int]]:
         return list(EXAM_REGIONS_PER_PAGE[alias])
     if "daa" in ex and "dm" not in ex and "mining" not in ex:
         return list(EXAM_REGIONS_PER_PAGE["cie-daa"])
+    if "compiler" in ex or ex in {"cd", "comp"}:
+        return list(EXAM_REGIONS_PER_PAGE["cie-compiler"])
     return None
 
 
@@ -125,11 +134,6 @@ def resolve_regions_per_page(
     preset = sheet_layout_preset(ex)
     if preset:
         return preset
-    inferred = infer_layout_for_key_count(num_keys)
-    if inferred and _layout_ok(inferred):
-        return inferred
-    if num_keys == 6 and not groups:
-        return list(DEFAULT_SIX_QUESTION_LAYOUT)
     return None
 
 

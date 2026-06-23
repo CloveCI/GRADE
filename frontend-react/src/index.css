@@ -1543,10 +1543,24 @@ body { overflow-x: hidden; }
 .sheet-region-box {
   position: absolute;
   box-sizing: border-box;
-  border: 2px solid rgba(249, 115, 22, 0.75);
-  background: rgba(249, 115, 22, 0.08);
+  border: 2px solid rgba(249, 115, 22, 0.65);
+  background: rgba(249, 115, 22, 0.07);
   pointer-events: none;
   transition: border-color 0.15s, background 0.15s, box-shadow 0.15s;
+}
+
+.sheet-region-label {
+  position: absolute;
+  top: 2px;
+  left: 4px;
+  font-size: 0.65rem;
+  font-weight: 700;
+  line-height: 1.2;
+  color: #c2410c;
+  background: rgba(255, 255, 255, 0.9);
+  padding: 1px 5px;
+  border-radius: 3px;
+  letter-spacing: 0.02em;
 }
 
 .sheet-region-box.active {
@@ -1554,6 +1568,10 @@ body { overflow-x: hidden; }
   background: rgba(37, 99, 235, 0.12);
   box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.35);
   z-index: 2;
+}
+
+.sheet-region-box.active .sheet-region-label {
+  color: #1d4ed8;
 }
 
 .sheet-preview-pdf-embed {
@@ -1709,6 +1727,13 @@ body { overflow-x: hidden; }
   font-family: monospace;
   color: #334155;
   line-height: 1.6;
+}
+
+.q-text-box-scroll {
+  max-height: min(42vh, 420px);
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .eval-point {

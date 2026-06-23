@@ -62,10 +62,12 @@ function SheetPreview({
   pdfUrl,
   filename,
   activeRegionIndex = 0,
+  activeQuestionId = '',
   regionsPerPage = null,
   questionRegions = [],
   previewPage = 1,
   onPreviewPageChange = null,
+  refreshKey = 0,
 }) {
   const isPdf = isPdfFilename(filename);
   const canvasRef = useRef(null);
@@ -92,27 +94,31 @@ function SheetPreview({
     }
     let cancelled = false;
     (async () => {
-      const ok = await checkSheetPreviewImage(sheetId, 1);
-      if (cancelled) return;
-      setPreviewReady(ok);
-      if (ok) {
-        setMode('image');
-        const meta = await getSheetPreview(sheetId, { rebuild: true });
-        if (!cancelled) {
+      try {
+        const meta = await getSheetPreview(sheetId, { rebuild: refreshKey > 0 });
+        if (cancelled) return;
+        const pages = Number(meta?.page_count) || 0;
+        const hasImage = pages > 0 && await checkSheetPreviewImage(sheetId, 1);
+        setPreviewReady(hasImage);
+        if (hasImage) {
+          setMode('image');
           if (meta?.regions) setRegions(meta.regions);
-          if (meta?.page_count) setPageCount(meta.page_count);
+          if (pages) setPageCount(pages);
           if (meta?.regions_per_page?.length) setLayout(meta.regions_per_page);
+        } else if (isPdf) {
+          setMode('pdf');
         }
-      } else if (isPdf) {
-        setMode('pdf');
+      } catch {
+        if (!cancelled && isPdf) setMode('pdf');
       }
     })();
     return () => { cancelled = true; };
-  }, [sheetId, isPdf]);
+  }, [sheetId, isPdf, refreshKey]);
 
   useEffect(() => {
     const activeMeta = questionRegions.find(
-      (q) => (q.region_index ?? q.question_index) === activeRegionIndex,
+      (q) => (activeQuestionId && String(q.question_id) === String(activeQuestionId))
+        || (q.region_index ?? q.question_index) === activeRegionIndex,
     );
     const target = Number(activeMeta?.page_start) || pageForRegionIndex(activeRegionIndex, layout);
     if (target && onPreviewPageChange) {
@@ -188,15 +194,33 @@ function SheetPreview({
     );
   }
 
-  const imageUrl = sheetId ? sheetPreviewImageUrl(sheetId, displayPage) : '';
+  const imageUrl = sheetId
+    ? `${sheetPreviewImageUrl(sheetId, displayPage)}${refreshKey ? `?v=${refreshKey}` : ''}`
+    : '';
   const visibleRegions = regions.filter((r) => (r.page ?? 1) === displayPage);
   const activeMeta = questionRegions.find(
-    (q) => (q.region_index ?? q.question_index) === activeRegionIndex,
+    (q) => (activeQuestionId && String(q.question_id) === String(activeQuestionId))
+      || (q.region_index ?? q.question_index) === activeRegionIndex,
   );
   const activeSegments = (activeMeta?.segments || []).filter((s) => (s.page ?? 1) === displayPage);
-  const effectivePageCount = regions.length
-    ? Math.max(...regions.map((r) => r.page ?? 1))
-    : (layout?.length || pageCount);
+  const overlayItems = visibleRegions.length
+    ? visibleRegions.map((r, ri) => ({
+      key: `raw-${r.raw_region_index ?? ri}-${r.page}`,
+      bbox: r.bbox,
+      regionIndex: r.region_index ?? ri,
+      label: `Q${(r.region_index ?? ri) + 1}`,
+    }))
+    : activeSegments.map((seg, si) => ({
+      key: `seg-${seg.raw_region_index ?? si}-${seg.page}`,
+      bbox: scaleBboxToPreview(seg.bbox),
+      regionIndex: activeRegionIndex,
+      label: activeQuestionId || `Q${activeRegionIndex + 1}`,
+    }));
+  const effectivePageCount = pageCount > 1
+    ? pageCount
+    : (regions.length
+      ? Math.max(...regions.map((r) => r.page ?? 1))
+      : (layout?.length || 1));
   const showImageMode = mode === 'image' && previewReady && sheetId;
   const showPdfMode = mode === 'pdf' && isPdf;
   const showRasterFallback = mode === 'image' && !previewReady && !isPdf && pdfUrl;
@@ -213,7 +237,28 @@ function SheetPreview({
             onClick={() => { setMode('pdf'); setLoadError(''); }}>Full PDF</button>
         )}
         {showImageMode && effectivePageCount > 1 && (
-          <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
+          <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: '0.35rem', flexWrap: 'wrap' }}>
+            <button
+              type="button"
+              className="btn btn-ghost btn-sm"
+              disabled={displayPage <= 1}
+              onClick={() => onPreviewPageChange?.(displayPage - 1)}
+              title="Previous page"
+            >
+              ← Page
+            </button>
+            <span style={{ fontSize: '0.75rem', color: 'var(--outline)', minWidth: '5rem', textAlign: 'center' }}>
+              {displayPage} / {effectivePageCount}
+            </span>
+            <button
+              type="button"
+              className="btn btn-ghost btn-sm"
+              disabled={displayPage >= effectivePageCount}
+              onClick={() => onPreviewPageChange?.(displayPage + 1)}
+              title="Next page"
+            >
+              Page →
+            </button>
             {activeMeta && Number(activeMeta.page_end) > Number(activeMeta.page_start) && (
               <>
                 <button
@@ -254,46 +299,28 @@ function SheetPreview({
               onLoad={(e) => setImgSize({ w: e.target.naturalWidth, h: e.target.naturalHeight })}
               onError={handleImageError}
             />
-            {imgSize.w > 0 && (
+            {imgSize.w > 0 && overlayItems.length > 0 && (
               <div className="sheet-preview-overlays">
-                {activeSegments.length > 0
-                  ? activeSegments.map((seg, si) => {
-                    const bbox = scaleBboxToPreview(seg.bbox);
-                    const [x, y, w, h] = bbox || [];
-                    if (w == null) return null;
-                    return (
-                      <div
-                        key={`seg-${seg.raw_region_index ?? si}-${seg.page}`}
-                        className="sheet-region-box active"
-                        style={{
-                          left: `${(x / imgSize.w) * 100}%`,
-                          top: `${(y / imgSize.h) * 100}%`,
-                          width: `${(w / imgSize.w) * 100}%`,
-                          height: `${(h / imgSize.h) * 100}%`,
-                        }}
-                        title={`Q${activeRegionIndex + 1} answer region`}
-                      />
-                    );
-                  })
-                  : visibleRegions
-                    .filter((r) => r.region_index === activeRegionIndex)
-                    .map((r, ri) => {
-                      const [x, y, w, h] = r.bbox || [];
-                      if (w == null) return null;
-                      return (
-                        <div
-                          key={`raw-${r.raw_region_index ?? ri}-${r.page}`}
-                          className="sheet-region-box active"
-                          style={{
-                            left: `${(x / imgSize.w) * 100}%`,
-                            top: `${(y / imgSize.h) * 100}%`,
-                            width: `${(w / imgSize.w) * 100}%`,
-                            height: `${(h / imgSize.h) * 100}%`,
-                          }}
-                          title={`Q${(r.region_index ?? 0) + 1}`}
-                        />
-                      );
-                    })}
+                {overlayItems.map((item) => {
+                  const [x, y, w, h] = item.bbox || [];
+                  if (w == null) return null;
+                  const isActive = item.regionIndex === activeRegionIndex;
+                  return (
+                    <div
+                      key={item.key}
+                      className={`sheet-region-box${isActive ? ' active' : ''}`}
+                      style={{
+                        left: `${(x / imgSize.w) * 100}%`,
+                        top: `${(y / imgSize.h) * 100}%`,
+                        width: `${(w / imgSize.w) * 100}%`,
+                        height: `${(h / imgSize.h) * 100}%`,
+                      }}
+                      title={item.label}
+                    >
+                      <span className="sheet-region-label">{item.label}</span>
+                    </div>
+                  );
+                })}
               </div>
             )}
           </div>
@@ -329,6 +356,20 @@ function SheetPreview({
   );
 }
 
+function formatTextLabel(text) {
+  const n = String(text || '').trim().length;
+  return n > 0 ? ` (${n.toLocaleString()} chars)` : '';
+}
+
+function cleanedDiffersFromOcr(recognized, formatted) {
+  const raw = String(recognized || '').trim();
+  const clean = String(formatted || '').trim();
+  if (!clean || !raw) return false;
+  if (clean === raw) return false;
+  const norm = (s) => s.replace(/\s+/g, ' ').toLowerCase();
+  return norm(clean) !== norm(raw);
+}
+
 function truncate(text, max = 72) {
   const t = String(text || '').trim();
   if (t.length <= max) return t;
@@ -345,10 +386,16 @@ function attachPrompts(questions, promptsById) {
 
 function pickBetterQuestion(prev, q) {
   if (!prev) return q;
-  const prevText = String(prev.recognized || '').trim();
-  const qText = String(q.recognized || '').trim();
-  if (qText.length > prevText.length) return q;
-  if (qText.length < prevText.length) return prev;
+  const prevLen = Math.max(
+    String(prev.recognized || '').trim().length,
+    String(prev.formatted || '').trim().length,
+  );
+  const qLen = Math.max(
+    String(q.recognized || '').trim().length,
+    String(q.formatted || '').trim().length,
+  );
+  if (qLen > prevLen) return q;
+  if (qLen < prevLen) return prev;
   if (q.score > prev.score) return q;
   if (q.score < prev.score) return prev;
   const prevRi = prev.regionIndex ?? 999;
@@ -407,7 +454,7 @@ function resultNeedsRegrade(result, keyCount, session = null) {
   if (flags.has('layout:1') && session?.examId && hintForExam(session.examId) === '3,1,2,1') {
     return true;
   }
-  if (flags.has('layout:3,1,1,1') && session?.examId && hintForExam(session.examId) === '3,1,2,1') {
+  if (flags.has('layout:3,1,2,1') && session?.examId && hintForExam(session.examId) === '3,1,1,2') {
     return true;
   }
   return false;
@@ -525,6 +572,7 @@ export default function EvaluatorPage() {
   const [questionPrompts, setQuestionPrompts] = useState({});
   const [sheetPreviewUrl, setSheetPreviewUrl] = useState('');
   const [previewPage, setPreviewPage] = useState(1);
+  const [previewRefresh, setPreviewRefresh] = useState(0);
   const [questionRegions, setQuestionRegions] = useState([]);
   const [staleResult, setStaleResult] = useState(false);
   const [hitlEnabled] = useState(loadHitlEnabled);
@@ -587,6 +635,7 @@ export default function EvaluatorPage() {
     });
     const sid = result.sheet_id || session.sheetId;
     if (sid) setSheetPreviewUrl(sheetFileUrl(sid));
+    setPreviewRefresh((n) => n + 1);
     checkStale(result, result.exam_id || session.examId).then(setStaleResult);
   }, [questionPrompts]);
 
@@ -894,10 +943,12 @@ export default function EvaluatorPage() {
                   pdfUrl={sheetPreviewUrl}
                   filename={meta.filename}
                   activeRegionIndex={activeRegionIndex}
+                  activeQuestionId={activeQuestion?.questionId || ''}
                   regionsPerPage={meta.regionsPerPage}
                   questionRegions={questionRegions}
                   previewPage={previewPage}
                   onPreviewPageChange={setPreviewPage}
+                  refreshKey={previewRefresh}
                 />
               </div>
             </div>
@@ -952,16 +1003,20 @@ export default function EvaluatorPage() {
                         )}
                         <div className="q-cols">
                           <div>
-                            <label style={{ fontSize: '0.5625rem', fontWeight: 700, textTransform: 'uppercase', color: 'var(--outline)', display: 'block', marginBottom: '0.5rem' }}>Student answer (OCR from sheet)</label>
-                            <div className="q-text-box">
+                            <label style={{ fontSize: '0.5625rem', fontWeight: 700, textTransform: 'uppercase', color: 'var(--outline)', display: 'block', marginBottom: '0.5rem' }}>
+                              Student answer (OCR from sheet){formatTextLabel(q.recognized)}
+                            </label>
+                            <div className="q-text-box q-text-box-scroll">
                               {q.recognized?.trim()
                                 ? q.recognized.split('\n').map((line, li) => <span key={li}>{line}<br /></span>)
                                 : <span style={{ color: 'var(--outline)' }}>No handwriting was detected in this answer region.</span>}
                             </div>
-                            {q.formatted?.trim() && q.formatted.trim() !== q.recognized?.trim() && (
+                            {cleanedDiffersFromOcr(q.recognized, q.formatted) && (
                               <div style={{ marginTop: '0.5rem' }}>
-                                <label style={{ fontSize: '0.5625rem', fontWeight: 700, textTransform: 'uppercase', color: 'var(--outline)', display: 'block', marginBottom: '0.25rem' }}>Cleaned for grading</label>
-                                <div className="q-text-box" style={{ opacity: 0.85, fontSize: '0.8125rem' }}>
+                                <label style={{ fontSize: '0.5625rem', fontWeight: 700, textTransform: 'uppercase', color: 'var(--outline)', display: 'block', marginBottom: '0.25rem' }}>
+                                  Cleaned for grading{formatTextLabel(q.formatted)}
+                                </label>
+                                <div className="q-text-box q-text-box-scroll" style={{ opacity: 0.85, fontSize: '0.8125rem' }}>
                                   {q.formatted.split('\n').map((line, li) => <span key={li}>{line}<br /></span>)}
                                 </div>
                               </div>

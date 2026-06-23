@@ -2,6 +2,8 @@
 export const EXAM_REGION_HINTS = {
   'cie-daa': '3,1,2,1',
   'cie-dm': '2,2,1,1,1',
+  'cie-compiler': '3,1,1,2',
+  ml: '3,1,1,2',
 };
 
 export function hintForKeyCount(keyCount) {
@@ -15,6 +17,8 @@ export function hintForExam(examId) {
   const key = examId.trim().toLowerCase();
   if (EXAM_REGION_HINTS[key]) return EXAM_REGION_HINTS[key];
   if (key.includes('daa') && !key.includes('dm')) return '3,1,2,1';
+  if (key === 'ml') return '3,1,1,2';
+  if (key.includes('compiler') || key === 'cd' || key === 'comp') return '3,1,1,2';
   return '';
 }
 

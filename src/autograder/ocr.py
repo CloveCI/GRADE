@@ -711,7 +711,40 @@ def _ocr_cloud_only_mode() -> bool:
     return _env_truthy("GRADE_OCR_CLOUD_ONLY")
 
 
-def ocr_patch(
+def _vertical_tile_bounds(
+    height: int,
+    *,
+    tile_h: int,
+    overlap: int,
+) -> List[Tuple[int, int]]:
+    """``(y0, y1)`` slices for tall handwriting patches."""
+    if height <= tile_h:
+        return [(0, height)]
+    out: List[Tuple[int, int]] = []
+    y = 0
+    while y < height:
+        y1 = min(height, y + tile_h)
+        out.append((y, y1))
+        if y1 >= height:
+            break
+        y = max(y + 1, y1 - overlap)
+    return out
+
+
+def _should_tile_vertically(image: np.ndarray) -> bool:
+    """Split very tall answer strips — opt-in via ``GRADE_OCR_TILE_TALL=1``."""
+    if not _env_truthy("GRADE_OCR_TILE_TALL"):
+        return False
+    h, w = image.shape[:2]
+    if h < 1 or w < 1:
+        return False
+    min_h = _parse_positive_int("GRADE_OCR_TILE_MIN_HEIGHT", 2200)
+    if h >= min_h:
+        return True
+    return h >= 1400 and h > w * 2.0
+
+
+def _ocr_patch_single(
     image: np.ndarray,
     *,
     trocr_model_name: str = "microsoft/trocr-base-handwritten",
@@ -790,6 +823,82 @@ def ocr_patch(
     )
 
 
+def _ocr_patch_tiled(
+    image: np.ndarray,
+    *,
+    trocr_model_name: str = "microsoft/trocr-base-handwritten",
+    trocr_beam_width: int = TROCR_BEAM_WIDTH,
+    retry_delay: float = 0.15,
+) -> OCRResult:
+    """OCR a tall patch as overlapping vertical tiles, then merge transcripts."""
+    h = int(image.shape[0])
+    tile_h = _parse_positive_int("GRADE_OCR_TILE_HEIGHT", 2000)
+    overlap = _parse_positive_int("GRADE_OCR_TILE_OVERLAP", 160)
+    texts: List[str] = []
+    confs: List[float] = []
+    engines: List[str] = []
+    flags: List[str] = ["ocr_tiled"]
+    for y0, y1 in _vertical_tile_bounds(h, tile_h=tile_h, overlap=overlap):
+        tile = image[y0:y1, :]
+        if tile.size == 0:
+            continue
+        part = _ocr_patch_single(
+            tile,
+            trocr_model_name=trocr_model_name,
+            trocr_beam_width=trocr_beam_width,
+            retry_delay=retry_delay,
+        )
+        if (part.text or "").strip():
+            texts.append(part.text.strip())
+            confs.append(float(part.confidence))
+            engines.append(part.engine)
+            flags.extend(part.flags or [])
+    if not texts:
+        return OCRResult(
+            text="",
+            confidence=0.0,
+            engine="none",
+            low_confidence=True,
+            flags=["ocr_uncertainty", "review_required", "ocr_tiled_empty"],
+        )
+    merged = "\n".join(texts)
+    engine = engines[0] if len(set(engines)) == 1 else "tiled:" + "+".join(sorted(set(engines)))
+    avg_conf = sum(confs) / len(confs) if confs else 0.0
+    return _make_result(merged, avg_conf, engine)
+
+
+def ocr_patch(
+    image: np.ndarray,
+    *,
+    trocr_model_name: str = "microsoft/trocr-base-handwritten",
+    trocr_beam_width: int = TROCR_BEAM_WIDTH,
+    retry_delay: float = 0.15,
+) -> OCRResult:
+    """
+    OCR a single preprocessed patch via the three-tier fallback chain.
+
+    Very tall strips are split into overlapping vertical tiles first (``GRADE_OCR_TILE_TALL``).
+    """
+    if _should_tile_vertically(image):
+        logger.info(
+            "Tiling tall OCR patch %dx%d for full-page handwriting.",
+            int(image.shape[1]),
+            int(image.shape[0]),
+        )
+        return _ocr_patch_tiled(
+            image,
+            trocr_model_name=trocr_model_name,
+            trocr_beam_width=trocr_beam_width,
+            retry_delay=retry_delay,
+        )
+    return _ocr_patch_single(
+        image,
+        trocr_model_name=trocr_model_name,
+        trocr_beam_width=trocr_beam_width,
+        retry_delay=retry_delay,
+    )
+
+
 def ocr_patch_consensus(
     image: np.ndarray,
     *,
@@ -806,6 +915,14 @@ def ocr_patch_consensus(
 
     This preserves Phase 2 architecture while preparing for consensus upgrades.
     """
+    if _should_tile_vertically(image):
+        return ocr_patch(
+            image,
+            trocr_model_name=trocr_model_name,
+            trocr_beam_width=trocr_beam_width,
+            retry_delay=retry_delay,
+        )
+
     cloud_result: OCRResult | None = None
     paddle_result: OCRResult | None = None
 

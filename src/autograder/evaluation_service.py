@@ -20,7 +20,6 @@ from autograder.db import (
 )
 from autograder.exam_layouts import prompt_from_expected_answer, resolve_regions_per_page
 from autograder.ocr import ocr_patch, ocr_patch_consensus
-from autograder.rag.boundaries import extract_sheet_answer_span
 from autograder.preprocessing import preprocess_sheet_for_evaluation
 from autograder.rag.retrieval import retrieve_context_for_grading, retrieve_sheet_answer_for_question
 from autograder.schemas import EvaluateRequest, EvaluateResponse, QuestionResult, RubricScores
@@ -204,7 +203,17 @@ def run_evaluation(req: EvaluateRequest, progress_callback: ProgressCallback = N
     if not pp.patches:
         raise HTTPException(status_code=422, detail="No answer regions detected")
 
-    # Persist per-sheet question/page/region map for audit + UI consistency.
+    layout_mismatch = len(pp.patches) != len(keys)
+    if layout_mismatch:
+        logger.warning(
+            "Region/key count mismatch for %s: %s region(s) vs %s key(s) (layout=%s)",
+            req.sheet_id,
+            len(pp.patches),
+            len(keys),
+            regions_per_page,
+        )
+
+    patches = pp.patches[: len(keys)] if len(pp.patches) > len(keys) else pp.patches
     qr = []
     for item in (pp.diagnostics.get("question_regions") or []):
         qi = int(item.get("question_index") or 0)
@@ -227,7 +236,6 @@ def run_evaluation(req: EvaluateRequest, progress_callback: ProgressCallback = N
     except Exception as e:
         logger.warning("Could not persist sheet question regions for %s: %s", req.sheet_id, e)
 
-    patches = pp.patches[: len(keys)] if len(pp.patches) > len(keys) else pp.patches
     total_patches = len(patches)
 
     persisted_answers = {
@@ -300,12 +308,8 @@ def run_evaluation(req: EvaluateRequest, progress_callback: ProgressCallback = N
             elif rag_text not in raw_ocr:
                 raw_ocr = f"{raw_ocr}\n\n{rag_text}".strip()
         ocr_confidence = sum(ocr_confs) / len(ocr_confs) if ocr_confs else 0.0
-        next_key = keys[idx + 1] if idx + 1 < len(keys) else None
-        prev_key = keys[idx - 1] if idx > 0 else None
-        _, _, trimmed_ocr = extract_sheet_answer_span(
-            raw_ocr, key, next_key, isolated_region=True, prev_key=prev_key
-        )
-        ocr_for_grading = (trimmed_ocr or raw_ocr).strip()
+        # Isolated regions are 1:1 with answer keys — grade the full OCR transcript.
+        ocr_for_grading = raw_ocr.strip()
 
         if not ocr_for_grading:
             question_answer_rows.append(
@@ -351,19 +355,14 @@ def run_evaluation(req: EvaluateRequest, progress_callback: ProgressCallback = N
 
         chosen = keys[min(idx, len(keys) - 1)]
         formatted = format_student_answer(ocr_for_grading, chosen)
-        student_text = formatted.formatted
-        # Guardrails: reject aggressive rewrites that drift from OCR or prompt intent.
+        student_text = (formatted.formatted or "").strip()
+        if not student_text:
+            student_text = ocr_for_grading
         prompt_text = (
             question_texts.get(chosen["question_id"])
             or prompt_from_expected_answer(str(chosen.get("expected_answer") or ""))
             or str(chosen["question_id"])
         )
-        raw_cov = _prompt_coverage(prompt_text, ocr_for_grading)
-        fmt_cov = _prompt_coverage(prompt_text, student_text)
-        if _token_overlap(ocr_for_grading, student_text) < 0.35 or (fmt_cov + 0.15) < raw_cov:
-            student_text = ocr_for_grading
-            if "ocr_llm_format_rejected" not in formatted.flags:
-                formatted.flags.append("ocr_llm_format_rejected")
         rag_ctx = retrieve_context_for_grading(
             req.sheet_id, req.exam_id, student_text, chosen, top_k=req.top_k, region_index=idx
         )
@@ -445,12 +444,19 @@ def run_evaluation(req: EvaluateRequest, progress_callback: ProgressCallback = N
                 if regions_per_page
                 else {"segmentation_v3"}
             )
+            | ({"layout_region_mismatch"} if layout_mismatch else set())
         ),
     }
     try:
         upsert_sheet_question_answers(req.sheet_id, req.exam_id, question_answer_rows)
     except Exception as e:
         logger.warning("Could not persist sheet question answers for %s: %s", req.sheet_id, e)
+    try:
+        from autograder.sheet_preview import build_sheet_preview
+
+        build_sheet_preview(req.sheet_id, layout=regions_per_page)
+    except Exception as e:
+        logger.warning("Could not rebuild sheet preview for %s: %s", req.sheet_id, e)
     result_id = insert_evaluation_result(payload)
     return EvaluateResponse(
         result_id=result_id,

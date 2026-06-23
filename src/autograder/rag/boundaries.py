@@ -285,6 +285,7 @@ def _anchor_start_for_answer(
     key: Dict[str, Any],
     *,
     prev_key: Optional[Dict[str, Any]] = None,
+    isolated_region: bool = False,
 ) -> int:
     """Skip bleed from a prior question at the top of an isolated OCR strip."""
     qn = _question_number(key)
@@ -301,14 +302,17 @@ def _anchor_start_for_answer(
             if m:
                 anchors.append(start + m.start())
 
-    expected = str(key.get("expected_answer") or "")
-    prompt, _ = split_key_expected_answer(expected)
-    for kw in _prompt_keywords(prompt)[:6]:
-        if len(kw) < 5:
-            continue
-        m = re.search(re.escape(kw), search, re.I)
-        if m:
-            anchors.append(start + m.start())
+    # In isolated strips the student's answer repeats question vocabulary (e.g. hazard,
+    # vulnerability, risk) — only use prompt keywords when trimming shared multi-key regions.
+    if not isolated_region:
+        expected = str(key.get("expected_answer") or "")
+        prompt, _ = split_key_expected_answer(expected)
+        for kw in _prompt_keywords(prompt)[:6]:
+            if len(kw) < 5:
+                continue
+            m = re.search(re.escape(kw), search, re.I)
+            if m:
+                anchors.append(start + m.start())
 
     m = _QUESTION_BLEED.search(search)
     if m:
@@ -370,7 +374,9 @@ def extract_sheet_answer_span(
             pos = head.find(pl[: min(48, len(pl))])
             if pos >= 0 and pos < 160:
                 start = max(start, pos + len(pl[: min(48, len(pl))]))
-        start = _anchor_start_for_answer(normalized, start, key, prev_key=prev_key)
+        start = _anchor_start_for_answer(
+            normalized, start, key, prev_key=prev_key, isolated_region=True
+        )
     else:
         ans_m = _ANS_MARKER.search(normalized)
         if ans_m and ans_m.start() < 140:
@@ -389,7 +395,9 @@ def extract_sheet_answer_span(
                 start = max(start, pos + len(pl))
 
     end = len(normalized)
-    if next_key:
+    # Isolated strips are already one key per region — do not cut at next-question
+    # vocabulary (e.g. student writes "disasters risk" while Q5 prompt also says "disasters").
+    if next_key and not isolated_region:
         next_expected = str(next_key.get("expected_answer") or "")
         next_prompt, _ = split_key_expected_answer(next_expected)
         next_kws = _prompt_keywords(next_prompt)
@@ -406,8 +414,10 @@ def extract_sheet_answer_span(
     if prompt:
         pl = re.sub(r"\s+", " ", prompt.lower()).strip()
         el = re.sub(r"\s+", " ", extracted.lower()).strip()
-        if el.startswith(pl[: min(len(pl), 60)]):
-            extracted = extracted[len(pl) :].lstrip(" .:)-")
+        prefix = pl[: min(len(pl), 60)]
+        if prefix and el.startswith(prefix):
+            # Strip only the matched prefix length — not the full prompt (can be 200+ chars).
+            extracted = extracted[len(prefix) :].lstrip(" .:)-")
     if len(extracted) < 40 and normalized.strip():
         return 0, len(normalized), normalized.strip()
     return start, end, extracted
