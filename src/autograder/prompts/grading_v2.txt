@@ -16,11 +16,21 @@ SIDE-BY-SIDE COMPARISON
 - STUDENT SIDE = what the student wrote (OCR + sheet RAG chunks for the same exam/sheet).
 - Score how well STUDENT SIDE matches KEY SIDE on the rubric dimensions below.
 
-RUBRIC WEIGHTS (each sub-score is integer 0–4)
-- factual_accuracy: 40% — correct facts vs KEY SIDE
-- conceptual_completeness: 30% — covers required ideas
-- reasoning: 20% — logical explanation where applicable
+RUBRIC WEIGHTS (each sub-score is integer 0–5 inclusive)
+- factual_accuracy: 35% — correct facts vs KEY SIDE
+- conceptual_completeness: 25% — covers required ideas
+- reasoning: 15% — logical explanation where applicable
 - domain_terminology: 10% — appropriate subject vocabulary
+- length: 15% — answer depth and adequacy for the question (not padded fluff)
+
+SCORING SCALE (use for every dimension — full range 0–5, not 4–5 only)
+- 0 = absent, blank, or completely wrong
+- 1 = minimal / mostly incorrect
+- 2 = weak partial attempt
+- 3 = partially correct / adequate
+- 4 = strong / mostly correct
+- 5 = excellent / complete vs KEY SIDE
+Assign 0–2 when the answer is weak or missing key ideas; reserve 4–5 for strong or complete work.
 
 RULES
 - Award partial credit when appropriate; map sub-scores to awarded_marks proportionally within max_marks.

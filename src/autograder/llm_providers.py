@@ -79,9 +79,10 @@ def build_grading_user_prompt(
     payload_hint = (
         "Return ONLY JSON with keys: "
         "awarded_marks (number), rubric_scores (object with factual_accuracy, "
-        "conceptual_completeness, reasoning, domain_terminology — each integer 0–4), "
+        "conceptual_completeness, reasoning, domain_terminology, length — each integer 0–5 inclusive), "
         "feedback (string), grading_confidence (exactly one of: high, medium, low), "
         "flags (array of strings). "
+        "Use the full 0–5 range per dimension (0=absent/wrong … 5=excellent); do not use a 0–4 scale. "
         "Do not include max_marks."
     )
     grounding = rag_context if rag_context else (

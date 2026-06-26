@@ -7,19 +7,90 @@ import logging
 import threading
 from typing import Any, Dict, List, Optional
 
-from autograder.db import create_job, update_job
+from autograder.db import create_job, get_job, update_job
 from autograder.evaluation_service import run_evaluation
 from autograder.exam_layouts import parse_regions_per_page, resolve_regions_per_page
 from autograder.schemas import EvaluateRequest
 
 logger = logging.getLogger(__name__)
 
+_active_sheet_evaluations: Dict[str, str] = {}
+_sheet_eval_lock = threading.Lock()
+
+
+def sheet_evaluation_busy(sheet_id: str) -> bool:
+    release_stale_sheet_lock(sheet_id)
+    with _sheet_eval_lock:
+        return (sheet_id or "").strip() in _active_sheet_evaluations
+
+
+def running_evaluate_job_id(sheet_id: str) -> Optional[str]:
+    release_stale_sheet_lock(sheet_id)
+    with _sheet_eval_lock:
+        return _active_sheet_evaluations.get((sheet_id or "").strip())
+
+
+def release_stale_sheet_lock(sheet_id: str) -> None:
+    """Drop in-memory busy flag when the tracked job finished or vanished."""
+    sid = (sheet_id or "").strip()
+    if not sid:
+        return
+    with _sheet_eval_lock:
+        jid = _active_sheet_evaluations.get(sid)
+    if not jid:
+        return
+    job = get_job(jid)
+    if not job or job.get("status") in ("completed", "failed"):
+        end_sheet_evaluation(sid)
+
+
+def clear_sheet_evaluation_lock(sheet_id: str) -> None:
+    end_sheet_evaluation(sheet_id)
+
+
+def try_begin_sheet_evaluation(sheet_id: str, job_id: str) -> bool:
+    sid = (sheet_id or "").strip()
+    jid = (job_id or "").strip()
+    if not sid:
+        return True
+    release_stale_sheet_lock(sid)
+    with _sheet_eval_lock:
+        if sid in _active_sheet_evaluations:
+            return False
+        _active_sheet_evaluations[sid] = jid or sid
+        return True
+
+
+def end_sheet_evaluation(sheet_id: str) -> None:
+    sid = (sheet_id or "").strip()
+    if not sid:
+        return
+    with _sheet_eval_lock:
+        _active_sheet_evaluations.pop(sid, None)
+
 
 def _progress(job_id: str):
     def cb(percent: int, stage: str, meta: Optional[dict] = None):
-        update_job(job_id, status="running", progress=percent, stage=stage)
+        stage_out = stage
+        if meta:
+            qi = meta.get("question_index")
+            qt = meta.get("question_total")
+            if qi is not None and qt:
+                stage_out = f"{stage}:{int(qi)}/{int(qt)}"
+        try:
+            update_job(job_id, status="running", progress=percent, stage=stage_out)
+        except Exception as exc:
+            logger.warning("Non-fatal job progress update failed job=%s: %s", job_id, exc)
 
     return cb
+
+
+def _update_job_safe(job_id: str, **kwargs) -> None:
+    try:
+        update_job(job_id, **kwargs)
+    except Exception as exc:
+        logger.error("Job status update failed job=%s: %s", job_id, exc)
+        raise
 
 
 def start_job_thread(target, *args, **kwargs) -> None:
@@ -126,11 +197,25 @@ def run_upload_sheet_job(
 
 
 def run_evaluate_job(job_id: str, payload: Dict[str, Any]) -> None:
+    req = EvaluateRequest.model_validate(payload)
+    if not try_begin_sheet_evaluation(req.sheet_id, job_id):
+        try:
+            _update_job_safe(
+                job_id,
+                status="failed",
+                stage="error",
+                error=(
+                    "Another evaluation is already running for this answer sheet. "
+                    "Wait for it to finish before starting a new grade."
+                ),
+            )
+        except Exception:
+            logger.exception("Could not persist busy status for job=%s", job_id)
+        return
     try:
-        update_job(job_id, status="running", progress=5, stage="ocr_evaluate")
-        req = EvaluateRequest.model_validate(payload)
+        _update_job_safe(job_id, status="running", progress=5, stage="segment_regions")
         result = run_evaluation(req, progress_callback=_progress(job_id))
-        update_job(
+        _update_job_safe(
             job_id,
             status="completed",
             progress=100,
@@ -139,7 +224,13 @@ def run_evaluate_job(job_id: str, payload: Dict[str, Any]) -> None:
         )
     except Exception as e:
         logger.exception("evaluate job failed job=%s", job_id)
-        update_job(job_id, status="failed", stage="error", error=str(e))
+        err_msg = str(e)
+        try:
+            _update_job_safe(job_id, status="failed", stage="error", error=err_msg)
+        except Exception:
+            logger.exception("Could not persist failed status for job=%s", job_id)
+    finally:
+        end_sheet_evaluation(req.sheet_id)
 
 
 def job_to_response(job: Dict[str, Any]) -> Dict[str, Any]:

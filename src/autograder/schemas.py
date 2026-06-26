@@ -2,7 +2,18 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
+
+
+RUBRIC_SCALE_MAX = 5
+
+RUBRIC_DIMENSION_KEYS = (
+    "factual_accuracy",
+    "conceptual_completeness",
+    "reasoning",
+    "domain_terminology",
+    "length",
+)
 
 
 class AnswerKeyChunkOut(BaseModel):
@@ -85,10 +96,28 @@ class PatchQuestionRequest(BaseModel):
 
 
 class RubricScores(BaseModel):
-    factual_accuracy: int = Field(ge=0, le=4)
-    conceptual_completeness: int = Field(ge=0, le=4)
-    reasoning: int = Field(ge=0, le=4)
-    domain_terminology: int = Field(ge=0, le=4)
+    factual_accuracy: int = Field(default=0, ge=0, le=RUBRIC_SCALE_MAX)
+    conceptual_completeness: int = Field(default=0, ge=0, le=RUBRIC_SCALE_MAX)
+    reasoning: int = Field(default=0, ge=0, le=RUBRIC_SCALE_MAX)
+    domain_terminology: int = Field(default=0, ge=0, le=RUBRIC_SCALE_MAX)
+    length: int = Field(default=0, ge=0, le=RUBRIC_SCALE_MAX)
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_legacy(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        out = dict(data)
+        out.setdefault("length", 0)
+        for key in RUBRIC_DIMENSION_KEYS:
+            if key not in out:
+                out[key] = 0
+                continue
+            try:
+                out[key] = max(0, min(RUBRIC_SCALE_MAX, int(round(float(out[key])))))
+            except (TypeError, ValueError):
+                out[key] = 0
+        return out
 
 
 class EvaluationResult(BaseModel):

@@ -855,12 +855,14 @@ def get_rubric_breakdown(result_id: str):
         "conceptual_completeness": 0,
         "reasoning": 0,
         "domain_terminology": 0,
+        "length": 0,
     }
     for q in questions:
         totals["factual_accuracy"] += q.rubric_scores.factual_accuracy
         totals["conceptual_completeness"] += q.rubric_scores.conceptual_completeness
         totals["reasoning"] += q.rubric_scores.reasoning
         totals["domain_terminology"] += q.rubric_scores.domain_terminology
+        totals["length"] += q.rubric_scores.length
 
     return RubricBreakdownResponse(
         result_id=result_id,
@@ -1030,9 +1032,38 @@ async def job_upload_sheet(
 @app.post("/jobs/evaluate", response_model=JobResponse)
 def job_evaluate(req: EvaluateRequest):
     _require_database(need_rag=True, need_evaluation=True)
-    job_id = create_job("evaluate", req.model_dump())
-    from autograder.jobs import run_evaluate_job, start_job_thread
+    from autograder.db import get_job
+    from autograder.jobs import (
+        clear_sheet_evaluation_lock,
+        release_stale_sheet_lock,
+        run_evaluate_job,
+        running_evaluate_job_id,
+        sheet_evaluation_busy,
+        start_job_thread,
+    )
 
+    release_stale_sheet_lock(req.sheet_id)
+    if sheet_evaluation_busy(req.sheet_id):
+        existing = running_evaluate_job_id(req.sheet_id)
+        active = get_job(existing) if existing else None
+        active_status = (active or {}).get("status")
+        if req.force_regrade and active_status in (None, "completed", "failed"):
+            clear_sheet_evaluation_lock(req.sheet_id)
+        elif active_status in ("pending", "running"):
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "message": (
+                        "An evaluation is already running for this answer sheet. "
+                        "Wait for it to finish."
+                    ),
+                    "job_id": existing,
+                },
+            )
+        else:
+            clear_sheet_evaluation_lock(req.sheet_id)
+
+    job_id = create_job("evaluate", req.model_dump())
     start_job_thread(run_evaluate_job, job_id, req.model_dump())
     return JobResponse(job_id=job_id, job_type="evaluate", status="pending", progress=0, stage="")
 

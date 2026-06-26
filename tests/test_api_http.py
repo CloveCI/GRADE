@@ -151,6 +151,7 @@ def test_upload_sheet_and_evaluate_roundtrip(client, synthetic_binary_sheet, mon
                     conceptual_completeness=2,
                     reasoning=2,
                     domain_terminology=2,
+                    length=2,
                 ),
                 feedback="mock",
                 grading_confidence="high",

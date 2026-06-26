@@ -18,7 +18,7 @@ from autograder.llm_providers import (
     openrouter_fallback_enabled,
     openrouter_model,
 )
-from autograder.schemas import EvaluationResult, RubricScores
+from autograder.schemas import EvaluationResult, RubricScores, RUBRIC_SCALE_MAX
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +43,7 @@ def _legacy_fallback_score(student_answer: str, model_answer: str, max_marks: fl
     m_vec = embed_text_local(model_answer)
     sim = max(0.0, cosine_similarity(s_vec, m_vec))
     awarded = round(sim * max_marks, 1)
-    rub = int(round(min(4.0, sim * 4.0)))
+    rub = int(round(min(float(RUBRIC_SCALE_MAX), sim * float(RUBRIC_SCALE_MAX))))
     return EvaluationResult(
         awarded_marks=awarded,
         max_marks=max_marks,
@@ -52,6 +52,7 @@ def _legacy_fallback_score(student_answer: str, model_answer: str, max_marks: fl
             conceptual_completeness=rub,
             reasoning=rub,
             domain_terminology=rub,
+            length=rub,
         ),
         feedback="Fallback scoring used due to LLM unavailability.",
         grading_confidence="low",
@@ -59,22 +60,65 @@ def _legacy_fallback_score(student_answer: str, model_answer: str, max_marks: fl
     )
 
 
-def _from_json_payload(payload: Dict[str, Any], max_marks: float) -> EvaluationResult:
+def _infer_length_score(student_answer: str, model_answer: str, current: int) -> int:
+    if current > 0:
+        return min(RUBRIC_SCALE_MAX, current)
+    s_len = len((student_answer or "").strip())
+    m_len = max(1, len((model_answer or "").strip()))
+    if s_len < 15:
+        return 0
+    ratio = s_len / m_len
+    if s_len >= 400 or ratio >= 1.0:
+        return 5
+    if s_len >= 200 or ratio >= 0.65:
+        return 4
+    if s_len >= 100 or ratio >= 0.4:
+        return 3
+    if s_len >= 50 or ratio >= 0.2:
+        return 2
+    return 1
+
+
+def _apply_length_fallback(
+    result: EvaluationResult,
+    *,
+    student_answer: str,
+    model_answer: str,
+) -> EvaluationResult:
+    rs = result.rubric_scores
+    length = _infer_length_score(student_answer, model_answer, rs.length)
+    if length == rs.length:
+        return result
+    flags = list(result.flags)
+    if "length_inferred" not in flags:
+        flags.append("length_inferred")
+    return result.model_copy(
+        update={
+            "rubric_scores": rs.model_copy(update={"length": length}),
+            "flags": flags,
+        }
+    )
+
+
+def _from_json_payload(
+    payload: Dict[str, Any],
+    max_marks: float,
+    *,
+    student_answer: str = "",
+    model_answer: str = "",
+) -> EvaluationResult:
     payload = dict(payload)
     payload["max_marks"] = max_marks
     payload["awarded_marks"] = min(max(0.0, float(payload.get("awarded_marks", 0.0))), max_marks)
     rs = payload.get("rubric_scores")
     if isinstance(rs, dict):
-        fixed: Dict[str, int] = {}
-        for k in ("factual_accuracy", "conceptual_completeness", "reasoning", "domain_terminology"):
-            v = rs.get(k, 0)
-            try:
-                iv = int(round(float(v)))
-            except (TypeError, ValueError):
-                iv = 0
-            fixed[k] = max(0, min(4, iv))
-        payload["rubric_scores"] = fixed
-    return EvaluationResult.model_validate(payload)
+        payload["rubric_scores"] = RubricScores.model_validate(rs).model_dump()
+    result = EvaluationResult.model_validate(payload)
+    if student_answer or model_answer:
+        result = _apply_length_fallback(
+            result, student_answer=student_answer, model_answer=model_answer
+        )
+    return result
 
 
 def _parse_llm_json_text(text: str) -> Dict[str, Any]:
@@ -92,8 +136,11 @@ def _provider_error_hint(provider: str, exc: Exception) -> str:
             "Gemini API key is blocked (API_KEY_SERVICE_BLOCKED). "
             "Fix key restrictions or rely on OpenRouter fallback."
         )
-    if "429" in msg or "quota" in msg.lower():
-        return f"{provider} rate limit / quota exceeded; OpenRouter fallback may apply."
+    if "429" in msg or "quota" in msg.lower() or "rate limit" in msg.lower():
+        return (
+            f"{provider} rate limit / quota exceeded. "
+            "Wait for reset, add credits, or switch GRADE_LLM_PROVIDER in .env."
+        )
     line = msg.replace("\n", " ").strip()
     return f"{provider} error: {line[:200]}"
 
@@ -137,7 +184,12 @@ def _score_with_gemini(
     raw = (resp.text or "").strip()
     if not raw:
         raise RuntimeError("Gemini returned empty response")
-    return _from_json_payload(_parse_llm_json_text(raw), max_marks)
+    return _from_json_payload(
+        _parse_llm_json_text(raw),
+        max_marks,
+        student_answer=student_answer,
+        model_answer=model_answer,
+    )
 
 
 def _score_with_openrouter(
@@ -170,7 +222,12 @@ def _score_with_openrouter(
         json_mode=True,
         temperature=0.0,
     )
-    return _from_json_payload(_parse_llm_json_text(raw), max_marks)
+    return _from_json_payload(
+        _parse_llm_json_text(raw),
+        max_marks,
+        student_answer=student_answer,
+        model_answer=model_answer,
+    )
 
 
 def score_answer_llm(
@@ -204,6 +261,7 @@ def score_answer_llm(
             return _legacy_fallback_score(student_answer, model_answer, max_marks), model_name
 
     last_error: Optional[Exception] = None
+    last_provider = "llm"
     gkey = gemini_api_key()
     if gkey:
         try:
@@ -225,6 +283,7 @@ def score_answer_llm(
             return res.model_copy(update={"flags": flags}), model_name
         except Exception as exc:
             last_error = exc
+            last_provider = "gemini"
             logger.warning("Gemini grading failed: %s", exc)
 
     if openrouter_fallback_enabled():
@@ -247,24 +306,30 @@ def score_answer_llm(
             return res.model_copy(update={"flags": flags}), f"openrouter:{or_model}"
         except Exception as exc:
             last_error = exc
+            last_provider = "openrouter"
             logger.warning("OpenRouter grading failed: %s", exc)
 
     fb = _legacy_fallback_score(student_answer, model_answer, max_marks)
     hints: List[str] = []
+    rate_limited = False
     if last_error:
-        hints.append(_provider_error_hint("openrouter", last_error))
+        err_s = str(last_error).lower()
+        rate_limited = any(
+            token in err_s
+            for token in ("429", "quota", "rate limit", "token", "resource_exhausted", "free-models-per")
+        )
+        hints.append(_provider_error_hint(last_provider, last_error))
     elif not gkey and not openrouter_fallback_enabled():
         hints.append(
             "Set GRADE_GEMINI_API_KEY and/or GRADE_OPENROUTER_API_KEY in .env and restart the API."
         )
+    extra_flags = ["gemini_error", "openrouter_error", "review_required"]
+    if rate_limited:
+        extra_flags.append("llm_rate_limited")
     fb = fb.model_copy(
         update={
             "feedback": f"{fb.feedback} {' '.join(hints)}".strip(),
-            "flags": list(
-                dict.fromkeys(
-                    list(fb.flags) + ["gemini_error", "openrouter_error", "review_required"]
-                )
-            ),
+            "flags": list(dict.fromkeys(list(fb.flags) + extra_flags)),
         }
     )
     return fb, model_name

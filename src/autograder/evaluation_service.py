@@ -344,6 +344,7 @@ def run_evaluation(req: EvaluateRequest, progress_callback: ProgressCallback = N
                         conceptual_completeness=0,
                         reasoning=0,
                         domain_terminology=0,
+                        length=0,
                     ),
                     feedback="No OCR text detected for this answer region.",
                     grading_confidence="low",

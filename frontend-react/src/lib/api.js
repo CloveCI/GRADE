@@ -18,6 +18,8 @@ async function parseResponse(res) {
         message = detail.map((d) => d.msg || JSON.stringify(d)).join('; ');
       } else if (detail && typeof detail === 'object') {
         message = detail.message || detail.msg || JSON.stringify(detail);
+      } else if (data?.message) {
+        message = data.message;
       }
       const err = new Error(message);
       err.status = res.status;
@@ -28,7 +30,26 @@ async function parseResponse(res) {
     }
     return data;
   }
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  if (!res.ok) {
+    let message = `HTTP ${res.status}`;
+    try {
+      const text = (await res.text()).trim();
+      if (text) {
+        try {
+          const data = JSON.parse(text);
+          message = data?.detail || data?.message || text.slice(0, 400);
+          if (typeof message === 'object') message = JSON.stringify(message);
+        } catch {
+          message = text.slice(0, 400);
+        }
+      }
+    } catch {
+      /* keep default */
+    }
+    const err = new Error(message);
+    err.status = res.status;
+    throw err;
+  }
   return res;
 }
 

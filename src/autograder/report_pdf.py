@@ -6,6 +6,11 @@ import io
 from typing import Any, Dict, List
 
 
+def _manual_override_label(flags: List[Any]) -> str:
+    raw = [str(f) for f in (flags or [])]
+    return "Yes" if "human_override" in raw else "—"
+
+
 def build_evaluation_pdf(result_row: Dict[str, Any]) -> bytes:
     """
     Build a PDF bytes buffer from a DB result row (as returned by get_result).
@@ -23,6 +28,13 @@ def build_evaluation_pdf(result_row: Dict[str, Any]) -> bytes:
     styles = getSampleStyleSheet()
     story: List[Any] = []
 
+    result_flags = [str(f) for f in (result_row.get("flags") or [])]
+    manual_note = (
+        "<br/><b>Note:</b> This report includes manually adjusted scores."
+        if "human_override" in result_flags
+        else ""
+    )
+
     story.append(Paragraph("<b>GRADE — Evaluation Report</b>", styles["Title"]))
     story.append(Spacer(1, 12))
     story.append(
@@ -33,7 +45,8 @@ def build_evaluation_pdf(result_row: Dict[str, Any]) -> bytes:
             f"Confidence flag: {result_row.get('confidence_flag')}<br/>"
             f"Grading confidence: {result_row.get('grading_confidence')}<br/>"
             f"LLM model: {result_row.get('llm_model')}<br/>"
-            f"Prompt hash: {result_row.get('prompt_hash', '')[:48]}…",
+            f"Prompt hash: {result_row.get('prompt_hash', '')[:48]}…"
+            f"{manual_note}",
             styles["Normal"],
         )
     )
@@ -49,6 +62,8 @@ def build_evaluation_pdf(result_row: Dict[str, Any]) -> bytes:
             "CC",
             "RE",
             "DT",
+            "Len",
+            "Manual",
             "OCR",
             "GC",
             "Flags",
@@ -56,16 +71,22 @@ def build_evaluation_pdf(result_row: Dict[str, Any]) -> bytes:
     ]
     for q in questions:
         rs = q.get("rubric_scores", {})
-        flags = ", ".join(q.get("flags") or [])[:40]
+        q_flags = q.get("flags") or []
+        flags = ", ".join(str(f) for f in q_flags)[:40]
+        awarded = str(q.get("awarded_marks", ""))
+        if "human_override" in [str(f) for f in q_flags]:
+            awarded = f"{awarded}*"
         table_data.append(
             [
                 str(q.get("question_id", "")),
-                str(q.get("awarded_marks", "")),
+                awarded,
                 str(q.get("max_marks", "")),
                 str(rs.get("factual_accuracy", "")),
                 str(rs.get("conceptual_completeness", "")),
                 str(rs.get("reasoning", "")),
                 str(rs.get("domain_terminology", "")),
+                str(rs.get("length", "")),
+                _manual_override_label(q_flags),
                 f"{float(q.get('ocr_confidence', 0)):.2f}",
                 str(q.get("grading_confidence", "")),
                 flags,
@@ -86,13 +107,29 @@ def build_evaluation_pdf(result_row: Dict[str, Any]) -> bytes:
         )
     )
     story.append(t)
-    story.append(Spacer(1, 18))
+    story.append(Spacer(1, 6))
+    story.append(
+        Paragraph(
+            "<i>FA/CC/RE/DT/Len = rubric dimensions (each scored 0–5). "
+            "* = manually overridden awarded marks.</i>",
+            styles["Normal"],
+        )
+    )
+    story.append(Spacer(1, 12))
 
     story.append(Paragraph("<b>Per-question feedback</b>", styles["Heading2"]))
     for q in questions:
+        q_flags = [str(f) for f in (q.get("flags") or [])]
+        manual = (
+            " <b>[Manual score override applied]</b>"
+            if "human_override" in q_flags
+            else ""
+        )
         story.append(
             Paragraph(
-                f"<b>{q.get('question_id')}</b> — OCR text: {q.get('student_answer', '')[:500]}",
+                f"<b>{q.get('question_id')}</b>{manual} — "
+                f"Awarded: {q.get('awarded_marks')} / {q.get('max_marks')}<br/>"
+                f"OCR text: {q.get('student_answer', '')[:500]}",
                 styles["Normal"],
             )
         )

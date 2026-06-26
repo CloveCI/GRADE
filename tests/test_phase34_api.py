@@ -92,6 +92,7 @@ def test_evaluate_pipeline_smoke(monkeypatch):
                     conceptual_completeness=3,
                     reasoning=3,
                     domain_terminology=3,
+                    length=3,
                 ),
                 feedback="ok",
                 grading_confidence="high",
