@@ -1,0 +1,84 @@
+# Reference modules (local copies; GRADE app code lives under src/autograder/)
+/processing/
+/search/
+/storage/
+/tasks/
+
+# Local / typo folder names (legacy)
+miscillaneousSSS/
+micillaneousSSS/
+
+# Secrets and local env (never commit real keys)
+.env
+.env.*
+.env.local
+frontend/.env
+frontend/.env.*
+frontend/.env.local
+
+# Cloud / API key material (paths often used on disk; keep out of git)
+*-service-account*.json
+google-credentials.json
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+ENV/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+.dist/
+
+# Coverage / tooling
+.coverage
+coverage.xml
+htmlcov/
+.tox/
+
+# Local runtime / uploads (scanned sheets, etc.)
+data/
+
+# Generated RAG / OCR outputs (regenerate with scripts/ocr_pdf.py)
+/extraction.json
+extraction-*.json
+
+# Sample keys / scans (keep out of git unless you intend to share)
+/Key.pdf
+/docs/Key.pdf
+DocScanner*.pdf
+
+# IDE / editor
+.idea/
+.vscode/
+*.swp
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Cursor (local workspace state; optional — remove if you want to share rules)
+.cursor/
+
+# Frontend (Vite)
+frontend-legacy/
+frontend/node_modules/
+frontend/dist/
+
+frontend/*.tsbuildinfo
+frontend/vite.config.js
+frontend/vite.config.d.ts
+
+# Legacy/full app UI copy
+grade-companion-main/
+
+# Project docs
+DESIGN.md
