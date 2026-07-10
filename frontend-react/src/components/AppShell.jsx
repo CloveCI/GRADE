@@ -11,7 +11,7 @@ import Footer from './Footer';
  */
 export default function AppShell({ title, showStatus = true, showFooter = true, overflow = true, children }) {
   return (
-    <div className="app-shell">
+    <div className="app-shell portal-dark">
       <Sidebar />
       <div className="main-content" style={overflow ? {} : { overflow: 'hidden' }}>
         <Topbar title={title} showStatus={showStatus} />

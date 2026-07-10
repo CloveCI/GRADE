@@ -14,19 +14,19 @@ export default function Sidebar() {
 
   return (
     <aside className="sidebar">
-      <div className="sidebar-brand">
+      <Link to="/" className="sidebar-brand" style={{ textDecoration: 'none', display: 'flex', alignItems: 'center', gap: '0.75rem', cursor: 'pointer' }}>
         <div className="sidebar-brand-icon">
           <span className="material-symbols-outlined" style={{ fontVariationSettings: "'FILL' 1", fontSize: '1.125rem' }}>school</span>
         </div>
         <div className="sidebar-brand-text">
           <h1>GRADE</h1>
-          <p>Grading portal</p>
+          <p>GRADING PORTAL</p>
         </div>
-      </div>
+      </Link>
 
       <div style={{ padding: '0 1rem 0.75rem' }}>
         <button type="button" className="sidebar-new-btn" onClick={() => navigate('/processing')}>
-          <span className="material-symbols-outlined" style={{ fontSize: '1rem' }}>add_circle</span>
+          <span className="material-symbols-outlined" style={{ fontSize: '1.25rem' }}>add</span>
           Grade papers
         </button>
       </div>

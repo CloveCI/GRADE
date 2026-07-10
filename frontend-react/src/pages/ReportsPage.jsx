@@ -2,7 +2,6 @@ import { useState, useEffect } from 'react';
 import AppShell from '../components/AppShell';
 import { checkApiHealth, getResults, getSheets, getExams, reportPdfUrl } from '../lib/api';
 import { formatExamName } from '../lib/examLabels';
-import { hasManualOverride } from '../lib/rubric';
 
 function scoreColor(s) {
   if (s >= 76) return '#16a34a';
@@ -77,7 +76,6 @@ export default function ReportsPage() {
           band: label,
           bandClass: chipClass,
           marks: `${r.total_marks} / ${r.max_total}`,
-          manualOverride: hasManualOverride(r.flags),
         };
       });
 
@@ -156,15 +154,9 @@ export default function ReportsPage() {
               <div key={r.id} className="report-row" style={{ display: 'grid', gridTemplateColumns: '1fr 120px 100px 80px', gap: '1rem', alignItems: 'center', padding: '1rem 1.5rem', borderBottom: '1px solid #f1f5f9' }}>
                 <div>
                   <div style={{ fontWeight: 600, fontSize: '0.9375rem' }}>{r.name}</div>
-                  <div style={{ fontSize: '0.8125rem', color: 'var(--outline)' }}>
-                    {r.exam} · {r.date}
-                    {r.manualOverride && ' · Manual adjustments'}
-                  </div>
+                  <div style={{ fontSize: '0.8125rem', color: 'var(--outline)' }}>{r.exam} · {r.date}</div>
                 </div>
-                <span className="chip chip-neutral">
-                  {r.marks}
-                  {r.manualOverride ? '*' : ''}
-                </span>
+                <span className="chip chip-neutral">{r.marks}</span>
                 <div style={{ textAlign: 'center' }}>
                   <div style={{ fontWeight: 700, color: scoreColor(r.score) }}>{r.score}%</div>
                   <span className={`chip ${r.bandClass}`} style={{ fontSize: '0.625rem', marginTop: '0.25rem' }}>{r.band}</span>

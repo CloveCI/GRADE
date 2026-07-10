@@ -11,42 +11,29 @@ async function parseResponse(res) {
   if (ct.includes('application/json')) {
     const data = await res.json();
     if (!res.ok) {
-      const detail = data?.detail;
-      let message = `HTTP ${res.status}`;
-      if (typeof detail === 'string') message = detail;
-      else if (Array.isArray(detail)) {
-        message = detail.map((d) => d.msg || JSON.stringify(d)).join('; ');
-      } else if (detail && typeof detail === 'object') {
-        message = detail.message || detail.msg || JSON.stringify(detail);
-      } else if (data?.message) {
-        message = data.message;
+      let detail = `HTTP ${res.status}`;
+      let jobId = null;
+      if (typeof data?.detail === 'string') {
+        detail = data.detail;
+      } else if (Array.isArray(data?.detail)) {
+        detail = data.detail.map((d) => d.msg || JSON.stringify(d)).join('; ');
+      } else if (typeof data?.detail === 'object' && data.detail !== null) {
+        detail = data.detail.message || JSON.stringify(data.detail);
+        if (data.detail.job_id) {
+          jobId = data.detail.job_id;
+        }
       }
-      const err = new Error(message);
+      const err = new Error(detail);
       err.status = res.status;
-      if (detail && typeof detail === 'object' && detail.job_id) {
-        err.jobId = detail.job_id;
+      if (jobId) {
+        err.jobId = jobId;
       }
       throw err;
     }
     return data;
   }
   if (!res.ok) {
-    let message = `HTTP ${res.status}`;
-    try {
-      const text = (await res.text()).trim();
-      if (text) {
-        try {
-          const data = JSON.parse(text);
-          message = data?.detail || data?.message || text.slice(0, 400);
-          if (typeof message === 'object') message = JSON.stringify(message);
-        } catch {
-          message = text.slice(0, 400);
-        }
-      }
-    } catch {
-      /* keep default */
-    }
-    const err = new Error(message);
+    const err = new Error(`HTTP ${res.status}`);
     err.status = res.status;
     throw err;
   }

@@ -73,25 +73,39 @@ function FileUploadSlot({
   };
 
   return (
-    <div className="card" style={{ padding: '1.25rem', opacity: disabled ? 0.65 : 1 }}>
-      <div style={{ display: 'flex', alignItems: 'flex-start', gap: '0.75rem', marginBottom: '1rem' }}>
+    <div className="card" style={{ padding: '1.5rem', opacity: disabled ? 0.65 : 1, display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
+      <div style={{ display: 'flex', alignItems: 'flex-start', gap: '0.75rem' }}>
         <div style={{
           width: '2rem', height: '2rem', borderRadius: '50%', flexShrink: 0,
-          background: file ? '#dcfce7' : '#eff6ff', color: file ? '#16a34a' : 'var(--primary)',
+          background: file ? 'rgba(34, 197, 94, 0.15)' : 'rgba(99, 102, 241, 0.15)',
+          color: file ? '#4ade80' : '#a5b4fc',
           display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 700, fontSize: '0.875rem',
         }}>
           {file ? '✓' : step}
         </div>
         <div>
-          <h3 style={{ fontSize: '1rem', fontWeight: 700, margin: 0 }}>{title}</h3>
-          <p style={{ fontSize: '0.8125rem', color: 'var(--outline)', margin: '0.25rem 0 0' }}>{description}</p>
+          <h3 style={{ fontSize: '1rem', fontWeight: 800, color: '#ffffff', margin: 0 }}>{title}</h3>
+          <p style={{ fontSize: '0.8125rem', color: '#94a3b8', margin: '0.25rem 0 0' }}>{description}</p>
         </div>
       </div>
       <div
         className={`upload-zone${dragOver ? ' drag-over' : ''}${file ? ' has-file' : ''}`}
         role="button"
         tabIndex={disabled ? -1 : 0}
-        style={{ margin: 0, padding: '1.5rem 1rem', minHeight: '140px' }}
+        style={{
+          margin: 0,
+          padding: '2.5rem 1.5rem',
+          minHeight: '160px',
+          background: '#ffffff',
+          border: dragOver ? '2px dashed #6366f1' : '2px dashed #c7d2fe',
+          borderRadius: '12px',
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          justifyContent: 'center',
+          color: '#1e293b',
+          transition: 'all var(--transition)'
+        }}
         onClick={() => !disabled && inputRef.current?.click()}
         onKeyDown={(e) => { if (e.key === 'Enter' && !disabled) inputRef.current?.click(); }}
         onDragOver={(e) => { e.preventDefault(); if (!disabled) setDragOver(true); }}
@@ -100,21 +114,21 @@ function FileUploadSlot({
       >
         <input ref={inputRef} type="file" accept={accept} style={{ display: 'none' }} disabled={disabled}
           onChange={(e) => e.target.files?.[0] && onFile(e.target.files[0])} />
-        <span className="material-symbols-outlined" style={{ fontSize: '2rem', color: file ? '#16a34a' : 'var(--primary)', marginBottom: '0.5rem' }}>
-          {file ? 'task_alt' : icon}
+        <span className="material-symbols-outlined" style={{ fontSize: '2.25rem', color: file ? '#16a34a' : '#6366f1', marginBottom: '0.75rem' }}>
+          {file ? 'task_alt' : (icon === 'key' ? 'vpn_key' : 'description')}
         </span>
         {file ? (
           <>
-            <p style={{ fontWeight: 600, fontSize: '0.875rem', margin: '0 0 0.25rem', wordBreak: 'break-word' }}>{file.name}</p>
-            <p style={{ fontSize: '0.75rem', color: 'var(--outline)', margin: 0 }}>{formatBytes(file.size)}</p>
-            <button type="button" className="btn btn-ghost btn-sm" style={{ marginTop: '0.75rem' }}
+            <p style={{ fontWeight: 700, fontSize: '0.875rem', margin: '0 0 0.25rem', wordBreak: 'break-word', color: '#0f172a' }}>{file.name}</p>
+            <p style={{ fontSize: '0.75rem', color: '#64748b', margin: 0 }}>{formatBytes(file.size)}</p>
+            <button type="button" className="btn btn-ghost btn-sm" style={{ marginTop: '0.75rem', color: '#6366f1' }}
               onClick={(e) => { e.stopPropagation(); onFile(null); }}>Replace file</button>
           </>
         ) : (
           <>
-            <p style={{ fontWeight: 600, fontSize: '0.875rem', margin: '0 0 0.25rem' }}>Drop file here</p>
-            <p style={{ fontSize: '0.75rem', color: 'var(--outline)', margin: '0 0 0.75rem' }}>{formats}</p>
-            <span className="btn btn-secondary btn-sm">Choose file</span>
+            <p style={{ fontWeight: 700, fontSize: '0.875rem', margin: '0 0 0.25rem', color: '#0f172a' }}>Drop file here</p>
+            <p style={{ fontSize: '0.75rem', color: '#64748b', margin: '0 0 1rem' }}>{formats}</p>
+            <span className="btn btn-secondary btn-sm" style={{ background: '#ffffff', color: '#1e293b', border: '1px solid #cbd5e1', boxShadow: '0 1px 2px rgba(0,0,0,0.05)', fontWeight: 600 }}>Choose file</span>
           </>
         )}
       </div>
@@ -350,8 +364,18 @@ export default function UploadPage() {
         const sheetId = uploadDone.result?.sheet_id;
         setBatchQueue((q) => q.map((row, idx) => idx === i ? { ...row, status: 'grading', sheetId } : row));
         setStatusText(`Grading ${file.name}…`);
-        const evalJob = await createEvaluateJob(sheetId, ex, { regionsPerPage: regions });
-        const evalDone = await pollJob(evalJob.job_id, {
+        let evalJobId = null;
+        try {
+          const evalJob = await createEvaluateJob(sheetId, ex, { regionsPerPage: regions });
+          evalJobId = evalJob.job_id;
+        } catch (err) {
+          if (err.status === 409 && err.jobId) {
+            evalJobId = err.jobId;
+          } else {
+            throw err;
+          }
+        }
+        const evalDone = await pollJob(evalJobId, {
           onUpdate: (j) => setProgress(50 + Math.round(((i + (j.progress || 0) / 100) / batchFiles.length) * 50)),
         });
         if (evalDone.status === 'failed') throw new Error(evalDone.error);
@@ -380,8 +404,8 @@ export default function UploadPage() {
 
   return (
     <AppShell title="Grade new papers" showStatus>
-      <div className="page-wrapper">
-        <p style={{ color: 'var(--on-surface-variant)', marginBottom: '1.5rem', maxWidth: 560, lineHeight: 1.6 }}>
+      <div className="page-wrapper" style={{ color: '#f1f5f9' }}>
+        <p style={{ color: '#94a3b8', marginBottom: '1.5rem', maxWidth: 560, lineHeight: 1.6 }}>
           Upload marking schemes and student answer sheets, or add sheets to an exam that already has keys.
         </p>
 
@@ -392,7 +416,8 @@ export default function UploadPage() {
             { id: 'batch', label: 'Batch sheets' },
           ].map((m) => (
             <button key={m.id} type="button"
-              className={`btn btn-sm ${uploadMode === m.id ? 'btn-primary' : 'btn-secondary'}`}
+              className={`btn btn-sm ${uploadMode === m.id ? 'btn-grad' : ''}`}
+              style={uploadMode === m.id ? { borderRadius: '8px' } : { borderRadius: '8px', background: '#ffffff', color: '#1e293b', border: '1px solid #cbd5e1' }}
               onClick={() => setUploadMode(m.id)} disabled={uploading}>
               {m.label}
             </button>
@@ -550,10 +575,10 @@ export default function UploadPage() {
           </div>
 
           <aside style={{ position: 'sticky', top: '4.5rem' }}>
-            <button type="button" className="btn btn-primary" style={{ width: '100%', padding: '1rem', fontSize: '1rem' }}
+            <button type="button" className="btn btn-grad" style={{ width: '100%', padding: '1rem 1.5rem', fontSize: '1rem', borderRadius: '12px' }}
               disabled={!canSubmit}
               onClick={uploadMode === 'batch' ? runBatch : runUpload}>
-              <span className="material-symbols-outlined">auto_awesome</span>
+              <span className="material-symbols-outlined" style={{ fontVariationSettings: "'FILL' 1" }}>auto_awesome</span>
               {uploading ? 'Please wait…' : uploadMode === 'batch' ? 'Start batch' : 'Start grading'}
             </button>
           </aside>

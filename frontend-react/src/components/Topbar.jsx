@@ -16,20 +16,15 @@ export default function Topbar({ title, showStatus = true }) {
         )}
       </div>
       <div className="topbar-actions">
-        <div className="topbar-search">
-          <span className="material-symbols-outlined">search</span>
-          <input
-            type="text"
-            placeholder="Search papers, students…"
-            id="global-search"
-            aria-label="Global search"
-          />
-        </div>
         <button className="icon-btn" title="Notifications" aria-label="Notifications">
           <span className="material-symbols-outlined">notifications</span>
           <div className="notif-badge" />
         </button>
-        <div className="avatar" title="Account">MD</div>
+        <div className="profile-bubble" title="Account">
+          <span style={{ fontSize: '0.8125rem', color: '#94a3b8', marginRight: '0.25rem' }}>Welcome,</span>
+          <span style={{ fontSize: '0.8125rem', fontWeight: 600, color: '#f1f5f9' }}>Dr. Sarah Chen</span>
+          <div className="avatar" style={{ marginLeft: '0.5rem' }}>SC</div>
+        </div>
       </div>
     </header>
   );

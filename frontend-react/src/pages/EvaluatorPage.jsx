@@ -3,8 +3,6 @@ import { useNavigate } from 'react-router-dom';
 import Sidebar from '../components/Sidebar';
 import { formatExamName } from '../lib/examLabels';
 import { hintForExam, pageForRegionIndex } from '../lib/examLayouts';
-import { hasManualOverride, rubricPointsFromScores } from '../lib/rubric';
-import { classifyGradingError, rateLimitFromResult } from '../lib/errors';
 import { confColor } from '../lib/confidence';
 import { pollJob, stageLabel } from '../lib/jobs';
 import {
@@ -21,7 +19,6 @@ import {
   sheetPreviewImageUrl,
   checkSheetPreviewImage,
   createEvaluateJob,
-  getJob,
   patchQuestionScore,
   GRADE_SESSION,
 } from '../lib/api';
@@ -66,10 +63,6 @@ function SheetPreview({
   filename,
   activeRegionIndex = 0,
   activeQuestionId = '',
-  activePageStart = 1,
-  activePageEnd = 1,
-  examId = '',
-  keyCount = 0,
   regionsPerPage = null,
   questionRegions = [],
   previewPage = 1,
@@ -127,9 +120,7 @@ function SheetPreview({
       (q) => (activeQuestionId && String(q.question_id) === String(activeQuestionId))
         || (q.region_index ?? q.question_index) === activeRegionIndex,
     );
-    const target = Number(activePageStart)
-      || Number(activeMeta?.page_start)
-      || pageForRegionIndex(activeRegionIndex, layout, examId, keyCount);
+    const target = Number(activeMeta?.page_start) || pageForRegionIndex(activeRegionIndex, layout);
     if (target && onPreviewPageChange) {
       onPreviewPageChange(target);
       return;
@@ -138,19 +129,9 @@ function SheetPreview({
     const matches = regions.filter((r) => r.region_index === activeRegionIndex);
     const page = matches.length
       ? Math.min(...matches.map((r) => r.page ?? 1))
-      : pageForRegionIndex(activeRegionIndex, layout, examId, keyCount);
+      : pageForRegionIndex(activeRegionIndex, layout);
     if (page) onPreviewPageChange(page);
-  }, [
-    activeRegionIndex,
-    activeQuestionId,
-    activePageStart,
-    questionRegions,
-    regions,
-    layout,
-    examId,
-    keyCount,
-    onPreviewPageChange,
-  ]);
+  }, [activeRegionIndex, questionRegions, regions, layout, onPreviewPageChange]);
 
   const displayPage = previewPage || 1;
 
@@ -438,8 +419,8 @@ function collapseByQuestionId(questions) {
   return collapsed;
 }
 
-function sessionWithLayout(session, keyCount = 0) {
-  const layout = parseRegionsPerPage(hintForExam(session.examId, keyCount));
+function sessionWithLayout(session) {
+  const layout = parseRegionsPerPage(hintForExam(session.examId));
   if (layout?.length) {
     return { ...session, regionsPerPage: layout };
   }
@@ -546,9 +527,14 @@ function mapQuestions(result, promptsById = {}, keyCount = 0) {
       recognized: q.ocr_raw || q.student_answer || '',
       formatted: q.student_answer || '',
       feedback: q.feedback || '',
-      flags: q.flags || [],
-      manualOverride: hasManualOverride(q.flags),
-      points: rubricPointsFromScores(q.rubric_scores),
+      points: q.rubric_scores
+        ? [
+            { ok: (q.rubric_scores.factual_accuracy ?? 0) >= 2, text: `Accuracy — ${q.rubric_scores.factual_accuracy}/4` },
+            { ok: (q.rubric_scores.conceptual_completeness ?? 0) >= 2, text: `Completeness — ${q.rubric_scores.conceptual_completeness}/4` },
+            { ok: (q.rubric_scores.reasoning ?? 0) >= 2, text: `Reasoning — ${q.rubric_scores.reasoning}/4` },
+            { ok: (q.rubric_scores.domain_terminology ?? 0) >= 2, text: `Terminology — ${q.rubric_scores.domain_terminology}/4` },
+          ]
+        : [],
     };
   });
   return collapseByQuestionId(mapped);
@@ -575,7 +561,6 @@ export default function EvaluatorPage() {
   const [loading, setLoading] = useState(false);
   const [loadingSeconds, setLoadingSeconds] = useState(0);
   const [error, setError] = useState('');
-  const [errorInfo, setErrorInfo] = useState(null);
   const [meta, setMeta] = useState({
     filename: '',
     examId: '',
@@ -597,21 +582,29 @@ export default function EvaluatorPage() {
   const [evalStage, setEvalStage] = useState('');
   const pageRef = useRef(null);
   const runRef = useRef(0);
-  const evaluateInFlight = useRef(false);
   const sessionRef = useRef(loadGradeSession());
+  const applyResultRef = useRef(null);
 
-  const setGradingError = (err) => {
-    const info = err?.errorInfo || classifyGradingError(err?.message || String(err));
-    setError(info.message);
-    setErrorInfo(info);
-  };
-
-  const clearGradingError = () => {
-    setError('');
-    setErrorInfo(null);
-  };
-
-  const pollEvaluateJob = async (jobId) => {
+  const runEvaluate = async (session, { forceRegrade = false } = {}) => {
+    const withLayout = sessionWithLayout(session);
+    if (withLayout.regionsPerPage && !session.regionsPerPage) {
+      saveGradeSession({ regionsPerPage: withLayout.regionsPerPage });
+    }
+    let jobId = null;
+    try {
+      const job = await createEvaluateJob(withLayout.sheetId, withLayout.examId, {
+        expectedNumRegions: withLayout.expectedNumRegions ?? undefined,
+        regionsPerPage: withLayout.regionsPerPage ?? undefined,
+        forceRegrade,
+      });
+      jobId = job.job_id;
+    } catch (err) {
+      if (err.status === 409 && err.jobId) {
+        jobId = err.jobId;
+      } else {
+        throw err;
+      }
+    }
     sessionStorage.setItem(GRADE_SESSION.jobId, jobId);
     const finalJob = await pollJob(jobId, {
       onUpdate: (j) => {
@@ -620,71 +613,8 @@ export default function EvaluatorPage() {
       },
     });
     sessionStorage.removeItem(GRADE_SESSION.jobId);
-    if (finalJob.status === 'failed') {
-      const info = classifyGradingError(finalJob.error || 'Evaluation failed');
-      const err = new Error(info.message);
-      err.errorInfo = info;
-      throw err;
-    }
-    return finalJob;
-  };
-
-  const runEvaluate = async (session, { forceRegrade = false } = {}) => {
-    if (forceRegrade) {
-      sessionStorage.removeItem(GRADE_SESSION.jobId);
-      evaluateInFlight.current = false;
-    }
-    const storedJob = !forceRegrade ? sessionStorage.getItem(GRADE_SESSION.jobId) : null;
-    if (evaluateInFlight.current && storedJob) {
-      return (await pollEvaluateJob(storedJob)).result;
-    }
-    if (evaluateInFlight.current) {
-      const err = new Error('A grade is already running for this paper. Please wait for it to finish.');
-      err.errorInfo = classifyGradingError(err.message);
-      throw err;
-    }
-    evaluateInFlight.current = true;
-    try {
-      const withLayout = sessionWithLayout(session);
-      if (withLayout.regionsPerPage && !session.regionsPerPage) {
-        saveGradeSession({ regionsPerPage: withLayout.regionsPerPage });
-      }
-      let job;
-      try {
-        job = await createEvaluateJob(withLayout.sheetId, withLayout.examId, {
-          expectedNumRegions: withLayout.expectedNumRegions ?? undefined,
-          regionsPerPage: withLayout.regionsPerPage ?? undefined,
-          forceRegrade,
-        });
-      } catch (err) {
-        if (err?.status === 409 && err.jobId) {
-          const existing = await getJob(err.jobId);
-          if (forceRegrade && existing && (existing.status === 'completed' || existing.status === 'failed')) {
-            sessionStorage.removeItem(GRADE_SESSION.jobId);
-            job = await createEvaluateJob(withLayout.sheetId, withLayout.examId, {
-              expectedNumRegions: withLayout.expectedNumRegions ?? undefined,
-              regionsPerPage: withLayout.regionsPerPage ?? undefined,
-              forceRegrade: true,
-            });
-            return (await pollEvaluateJob(job.job_id)).result;
-          }
-          if (!forceRegrade && existing && (existing.status === 'pending' || existing.status === 'running')) {
-            return (await pollEvaluateJob(err.jobId)).result;
-          }
-          if (forceRegrade && existing && (existing.status === 'pending' || existing.status === 'running')) {
-            const busy = new Error(
-              'An evaluation is already running for this sheet. Wait for it to finish, then try Re-grade again.',
-            );
-            busy.errorInfo = classifyGradingError(busy.message);
-            throw busy;
-          }
-        }
-        throw err;
-      }
-      return (await pollEvaluateJob(job.job_id)).result;
-    } finally {
-      evaluateInFlight.current = false;
-    }
+    if (finalJob.status === 'failed') throw new Error(finalJob.error || 'Evaluation failed');
+    return finalJob.result;
   };
 
   const checkStale = async (result, examId) => {
@@ -718,12 +648,9 @@ export default function EvaluatorPage() {
     if (sid) setSheetPreviewUrl(sheetFileUrl(sid));
     setPreviewRefresh((n) => n + 1);
     checkStale(result, result.exam_id || session.examId).then(setStaleResult);
-    const rateInfo = rateLimitFromResult(result);
-    if (rateInfo) {
-      setError(rateInfo.message);
-      setErrorInfo(rateInfo);
-    }
   }, [questionPrompts]);
+
+  applyResultRef.current = applyResult;
 
   useEffect(() => {
     if (!loading) {
@@ -805,14 +732,18 @@ export default function EvaluatorPage() {
               keyCount,
             );
             if (keyCount && best && resultNeedsRegrade(best, keyCount, session) && cached.sheet_id && cached.exam_id) {
-              setStaleResult(true);
-              if (!cancelled && runId === runRef.current) {
-                applyResult(best, { ...session, sheetId: cached.sheet_id, examId: cached.exam_id }, keyCount);
+              const reg = await runEvaluate(
+                { ...session, sheetId: cached.sheet_id, examId: cached.exam_id },
+                { forceRegrade: true },
+              );
+              if (!cancelled && runId === runRef.current && reg) {
+                saveGradeSession({ resultId: reg.result_id, sheetId: reg.sheet_id, examId: reg.exam_id });
+                if (applyResultRef.current) applyResultRef.current(reg, { ...session, sheetId: reg.sheet_id, examId: reg.exam_id }, keyCount);
               }
             } else if (best) {
-              applyResult(best, session, keyCount);
+              if (applyResultRef.current) applyResultRef.current(best, session, keyCount);
             } else {
-              applyResult(cached, session, keyCount);
+              if (applyResultRef.current) applyResultRef.current(cached, session, keyCount);
             }
           }
           if (!cancelled && runId === runRef.current) setLoading(false);
@@ -829,25 +760,9 @@ export default function EvaluatorPage() {
       });
       setSheetPreviewUrl(sheetFileUrl(session.sheetId));
       setLoading(true);
-      clearGradingError();
+      setError('');
 
       try {
-        const storedJob = sessionStorage.getItem(GRADE_SESSION.jobId);
-        if (storedJob) {
-          const active = await getJob(storedJob);
-          if (active && (active.status === 'pending' || active.status === 'running')) {
-            const finalJob = await pollEvaluateJob(storedJob);
-            const prompts = await getExamQuestionPrompts(session.examId);
-            const keyCount = prompts?.length ?? 0;
-            if (!cancelled && runId === runRef.current && finalJob.result) {
-              saveGradeSession({ resultId: finalJob.result.result_id });
-              applyResult(finalJob.result, session, keyCount);
-            }
-            return;
-          }
-          sessionStorage.removeItem(GRADE_SESSION.jobId);
-        }
-
         let result = null;
         const prompts = await getExamQuestionPrompts(session.examId);
         const keyCount = prompts?.length ?? 0;
@@ -856,23 +771,17 @@ export default function EvaluatorPage() {
         if (result && resultNeedsRegrade(result, keyCount, session)) {
           setStaleResult(true);
           saveGradeSession({ regionsPerPage: session.regionsPerPage });
-          if (!cancelled && runId === runRef.current) {
-            saveGradeSession({ resultId: result.result_id });
-            applyResult(result, session, keyCount);
-          }
+          result = await runEvaluate(session, { forceRegrade: true });
         } else if (!result) {
           result = await runEvaluate(session);
-          if (!cancelled && runId === runRef.current && result) {
-            saveGradeSession({ resultId: result.result_id });
-            applyResult(result, session, keyCount);
-          }
-        } else if (!cancelled && runId === runRef.current) {
+        }
+        if (!cancelled && runId === runRef.current && result) {
           saveGradeSession({ resultId: result.result_id });
-          applyResult(result, session, keyCount);
+          if (applyResultRef.current) applyResultRef.current(result, session, keyCount);
         }
       } catch (err) {
         if (!cancelled && runId === runRef.current) {
-          setGradingError(err);
+          setError(err.message || 'Evaluation failed');
         }
       } finally {
         if (!cancelled && runId === runRef.current) setLoading(false);
@@ -880,7 +789,7 @@ export default function EvaluatorPage() {
     })();
 
     return () => { cancelled = true; };
-  }, [applyResult]);
+  }, []);
 
   const totalScore = questions.reduce((a, q) => a + q.score, 0);
   const totalMax = questions.reduce((a, q) => a + q.maxScore, 0);
@@ -888,12 +797,9 @@ export default function EvaluatorPage() {
   const handleRegrade = async () => {
     const session = sessionWithLayout(loadGradeSession());
     if (!session.sheetId || !session.examId) return;
-    sessionStorage.removeItem(GRADE_SESSION.jobId);
-    evaluateInFlight.current = false;
     setLoading(true);
-    clearGradingError();
+    setError('');
     setEvalProgress(0);
-    setEvalStage('');
     try {
       const prompts = await getExamQuestionPrompts(session.examId);
       const keyCount = prompts?.length ?? 0;
@@ -902,18 +808,7 @@ export default function EvaluatorPage() {
       applyResult(result, session, keyCount);
       setStaleResult(false);
     } catch (err) {
-      setGradingError(err);
-      try {
-        const prompts = await getExamQuestionPrompts(session.examId);
-        const keyCount = prompts?.length ?? 0;
-        const cached = await pickEvaluationResult(session, keyCount);
-        if (cached) {
-          applyResult(cached, session, keyCount);
-          setStaleResult(resultNeedsRegrade(cached, keyCount, session));
-        }
-      } catch {
-        /* keep error banner only */
-      }
+      setError(err.message || 'Re-grade failed');
     } finally {
       setLoading(false);
       setEvalStage('');
@@ -943,20 +838,17 @@ export default function EvaluatorPage() {
   const activeRegionIndex = activeQuestion?.regionIndex ?? 0;
 
   const selectQuestion = (idx) => {
-    const q = questions[idx];
-    if (!q) return;
-    const regionMeta = questionRegions.find(
-      (item) => (item.region_index ?? item.question_index) === (q.regionIndex ?? idx)
-        || String(item.question_id) === String(q.questionId),
-    );
-    const layout = meta.regionsPerPage?.length
-      ? meta.regionsPerPage
-      : parseRegionsPerPage(hintForExam(meta.examId, questions.length));
-    const page = Number(q.pageStart)
-      || Number(regionMeta?.page_start)
-      || pageForRegionIndex(q.regionIndex ?? idx, layout, meta.examId, questions.length);
-    if (page) setPreviewPage(page);
-    setQuestions((prev) => prev.map((item, i) => ({ ...item, active: i === idx })));
+    setQuestions((prev) => {
+      const q = prev[idx];
+      const regionMeta = questionRegions.find(
+        (item) => (item.region_index ?? item.question_index) === (q?.regionIndex ?? idx)
+          || String(item.question_id) === String(q?.questionId),
+      );
+      if (regionMeta?.page_start) {
+        setPreviewPage(Number(regionMeta.page_start));
+      }
+      return prev.map((item, i) => ({ ...item, active: i === idx }));
+    });
   };
 
   const zoomIn = () => {
@@ -978,13 +870,13 @@ export default function EvaluatorPage() {
   };
 
   return (
-    <div className="app-shell">
+    <div className="app-shell portal-dark">
       <Sidebar />
 
       <div className="main-content" style={{ overflow: 'hidden' }}>
         <header className="topbar">
           <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
-            <span style={{ fontSize: '1.125rem', fontWeight: 700, color: '#0f172a' }}>Review grades</span>
+            <span style={{ fontSize: '1.125rem', fontWeight: 700, color: '#ffffff' }}>Review grades</span>
             {meta.examId && (
               <span className="chip chip-neutral">{formatExamName(meta.examId)}</span>
             )}
@@ -1005,34 +897,7 @@ export default function EvaluatorPage() {
           </div>
         )}
 
-        {errorInfo && (
-          <div
-            style={{
-              padding: '0.75rem 1.5rem',
-              background: errorInfo.kind === 'rate_limit' ? '#fff7ed' : errorInfo.kind === 'busy' ? '#fffbeb' : errorInfo.kind === 'server' ? '#fef2f2' : '#fef2f2',
-              color: errorInfo.kind === 'rate_limit' ? '#9a3412' : errorInfo.kind === 'busy' ? '#92400e' : '#b91c1c',
-              fontSize: '0.875rem',
-              borderBottom: '1px solid rgba(0,0,0,0.06)',
-            }}
-          >
-            <div style={{ display: 'flex', alignItems: 'flex-start', gap: '0.5rem' }}>
-              <span className="material-symbols-outlined" style={{ fontSize: '1.125rem', marginTop: '0.05rem' }}>
-                {errorInfo.kind === 'rate_limit' ? 'speed' : errorInfo.kind === 'busy' ? 'hourglass_top' : 'error'}
-              </span>
-              <div>
-                <div style={{ fontWeight: 700 }}>{errorInfo.title}</div>
-                {error && error !== errorInfo.title && <div style={{ marginTop: '0.25rem' }}>{error}</div>}
-                {errorInfo.hint && (
-                  <div style={{ marginTop: '0.35rem', fontSize: '0.8125rem', opacity: 0.92 }}>
-                    {errorInfo.hint}
-                  </div>
-                )}
-              </div>
-            </div>
-          </div>
-        )}
-
-        {!errorInfo && error && (
+        {error && (
           <div style={{ padding: '0.75rem 1.5rem', background: '#fef2f2', color: '#b91c1c', fontSize: '0.875rem' }}>
             {error}
           </div>
@@ -1092,10 +957,6 @@ export default function EvaluatorPage() {
                   filename={meta.filename}
                   activeRegionIndex={activeRegionIndex}
                   activeQuestionId={activeQuestion?.questionId || ''}
-                  activePageStart={activeQuestion?.pageStart ?? 1}
-                  activePageEnd={activeQuestion?.pageEnd ?? activeQuestion?.pageStart ?? 1}
-                  examId={meta.examId}
-                  keyCount={questions.length}
                   regionsPerPage={meta.regionsPerPage}
                   questionRegions={questionRegions}
                   previewPage={previewPage}
@@ -1135,9 +996,6 @@ export default function EvaluatorPage() {
                       <div style={{ display: 'flex', alignItems: 'center', gap: '0.375rem' }}>
                         {q.confidence > 0 && (
                           <span style={{ fontSize: '0.75rem', fontWeight: 700, color: confColor(q.confidence) }}>{q.confidence}% read confidence</span>
-                        )}
-                        {q.manualOverride && (
-                          <span className="chip chip-warning" style={{ fontSize: '0.625rem' }} title="Score manually adjusted">Manual</span>
                         )}
                         <span style={{ fontSize: '1.125rem', fontWeight: 800 }}>{q.score}</span>
                         <span style={{ fontSize: '0.75rem', color: 'var(--outline)' }}>/ {q.maxScore}</span>
