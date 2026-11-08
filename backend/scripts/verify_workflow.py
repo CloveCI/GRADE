@@ -2,7 +2,7 @@
 """
 Verify GRADE bundle → ingest → evaluate workflow against Postgres.
 
-Usage (from repo root):
+Usage (from backend/):
   $env:PYTHONPATH = "src"
   python scripts/verify_workflow.py
   python scripts/verify_workflow.py --exam-id daa --sheet-id <uuid>

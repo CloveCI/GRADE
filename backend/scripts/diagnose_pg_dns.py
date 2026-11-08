@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Show how Python resolves GRADE_DATABASE_URL host (IPv4 vs IPv6).
-Usage (repo root): PYTHONPATH=src python scripts/diagnose_pg_dns.py
+Usage (from backend/): PYTHONPATH=src python scripts/diagnose_pg_dns.py
 """
 
 from __future__ import annotations

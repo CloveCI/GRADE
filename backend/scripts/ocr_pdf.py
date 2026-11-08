@@ -5,7 +5,7 @@ Run GRADE preprocessing + OCR on a scanned sheet PDF.
 PyMuPDF renders the page → segment → resize patches → ocr_patch (Google Vision upscales/enhances
 cloud images unless disabled via env — see .env.example).
 
-Usage (repo root):
+Usage (from backend/):
   $env:PYTHONPATH = "src"
   python scripts/ocr_pdf.py "path/to/scan.pdf"
   python scripts/ocr_pdf.py "path/to/scan.pdf" --page 3 --patch-size 896 --pdf-zoom 3.5

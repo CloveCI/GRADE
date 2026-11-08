@@ -6,7 +6,7 @@ This script is intentionally explanatory: it runs the same preprocessing and RAG
 chunking helpers used by the app, then prints a compact audit trail showing how
 PDF pages become OCR regions and how OCR confidence is carried into chunks.
 
-Usage from the repository root:
+Usage from the backend/ folder:
   $env:PYTHONPATH = "src"
   python scripts/show_grade_workflow.py "DocScanner 3 Apr 2026 12-56 am.pdf" --mock-ocr
   python scripts/show_grade_workflow.py "path/to/sheet.pdf" --page 2 --expected-regions 5

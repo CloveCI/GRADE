@@ -1,7 +1,7 @@
 # Local PostgreSQL + pgvector for development and pytest.
 #
 # Prerequisites: Docker Desktop (Windows) — start it and wait until it says "Running".
-# Usage (repo root):
+# Usage (from backend/):
 #   docker compose up -d
 #   docker compose ps
 #
