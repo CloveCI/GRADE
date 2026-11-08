@@ -1,0 +1,53 @@
+# Monthly, grouped, majors ignored, targeting staging: a small PR a month instead of a flood.
+# Set open-pull-requests-limit: 0 on an ecosystem to pause it. Security updates are a separate repository setting.
+# Version updates need the `staging` branch to exist on GitHub.
+version: 2
+
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    target-branch: staging
+    open-pull-requests-limit: 2
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+    schedule:
+      interval: monthly
+    groups:
+      actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: "ci"
+    labels: [dependencies, ci]
+
+  - package-ecosystem: pip
+    directory: /backend
+    target-branch: staging
+    open-pull-requests-limit: 2
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+    schedule:
+      interval: monthly
+    groups:
+      pip-minor-and-patch:
+        update-types: [minor, patch]
+    commit-message:
+      prefix: "build(backend)"
+    labels: [dependencies, backend]
+
+  - package-ecosystem: npm
+    directory: /frontend
+    target-branch: staging
+    open-pull-requests-limit: 2
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+    schedule:
+      interval: monthly
+    groups:
+      npm-minor-and-patch:
+        update-types: [minor, patch]
+    commit-message:
+      prefix: "build(frontend)"
+    labels: [dependencies, frontend]

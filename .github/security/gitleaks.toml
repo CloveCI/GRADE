@@ -1,0 +1,12 @@
+# gitleaks configuration. Extends the built-in ruleset and only allow-lists things that are provably not secrets.
+title = "GRADE gitleaks config"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "env templates and this config"
+paths = [
+  '''.*\.env\.example$''',
+  '''\.github/security/gitleaks.*''',
+]
