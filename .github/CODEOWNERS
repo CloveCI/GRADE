@@ -1,0 +1,12 @@
+# Default reviewers for everything: either maintainer can approve. GitHub only enforces CODEOWNERS when a ruleset requires
+# code-owner review (a Pro/Team feature for private repos); until then it still auto-requests a review on every PR.
+*                                       @Afeef-crypto @Syed-Liyaqat
+
+# Changes here can break grading, leak data or weaken the pipeline: always request the repository owner.
+/.github/                               @Afeef-crypto
+/SECURITY.md                            @Afeef-crypto
+/backend/src/autograder/db.py           @Afeef-crypto
+/backend/supabase/migrations/           @Afeef-crypto
+/backend/src/autograder/scoring.py      @Afeef-crypto
+/backend/src/autograder/prompts/        @Afeef-crypto
+/backend/.env.example                   @Afeef-crypto
