@@ -6,13 +6,15 @@
 ## Status
 Works end to end on the bundled CIE samples (`backend/cie/`) with Google Vision and Gemini configured. Without credentials it
 still runs: OCR falls through to whatever local engines are installed, and scoring uses the cosine-similarity fallback, which is
-only a rough signal. Agreement with human examiners has not been measured.
+only a rough signal. Agreement with human examiners has not been measured. Retrieval does less than the code's docstrings
+suggest; see [Known gaps in retrieval](#known-gaps-in-retrieval).
 
 ## How it works
 1. **Key upload.** DOCX, JSON or text PDF is parsed into one row per question with model answer and max marks
    (`key_docx.py`, `key_pdf.py`), then chunked and embedded for retrieval (`key_chunks.py`, `rag/ingest.py`).
-2. **Sheet upload.** The file is saved to `data/uploads/sheet_*.pdf` and a `sheets` row is created. OCR and RAG ingest are
-   **deferred** to evaluate, so upload is fast (`sheet_ingest: deferred`).
+2. **Sheet upload.** The file is saved to `data/uploads/sheet_*.pdf` and a `sheets` row is created. The portal's job routes
+   skip OCR and indexing (`sheet_ingest: deferred`). The sync routes `/upload/sheet` and `/upload/exam-bundle` instead run
+   `ingest_sheet_rag()` straight away: OCR, chunk, embed into `rag_chunks` as `sheet_{sheet_id}`.
 3. **Cache check.** `run_evaluation()` returns the latest stored result for the sheet and exam (`existing_evaluate_response`)
    unless `force_regrade` is set, the number of keys changed, the resolved layout differs (`layout:` flag), or the result
    predates `segmentation_v3`.
@@ -21,23 +23,29 @@ only a rough signal. Agreement with human examiners has not been measured.
 5. **Segment.** `preprocess_sheet_for_evaluation()` renders pages at `GRADE_PDF_RENDER_SCALE` (default 3.0), deskews, finds
    ink-aware strip boundaries, and merges strips into question regions. Regions are stored in `sheets.question_regions`
    and rendered as previews (`sheet_preview.py`).
-6. **OCR.** `ocr_patch()` tiles very tall patches, then tries Google Vision (`DOCUMENT_TEXT_DETECTION`), Azure, PaddleOCR, TrOCR
+6. **Pair and OCR.** Patch *n* is graded against key *n* (`keys[idx]`); `match_answer_key()` is not used by evaluate.
+   `ocr_patch()` tiles very tall patches, then tries Google Vision (`DOCUMENT_TEXT_DETECTION`), Azure, PaddleOCR, TrOCR
    in order, returning text, confidence and the engine used. `GRADE_OCR_GOOGLE_ONLY` / `GRADE_OCR_CLOUD_ONLY` narrow the chain.
-7. **Retrieve and trim.** `retrieve_context_for_grading()` combines pgvector similarity and full-text search over key chunks;
-   `rag/boundaries.py` trims text belonging to the neighbouring question.
-8. **Score.** `score_answer_llm()`: if `GRADE_ENABLE_LLM` is off → legacy cosine score; else `GRADE_LLM_MOCK_RESPONSE` (tests) →
+7. **Merge indexed sheet text.** `retrieve_sheet_answer_for_question()` loads any `sheet_{sheet_id}` chunks tagged with the
+   question and slices the fresh OCR by their stored offsets; if that text is longer it replaces the OCR, otherwise it is
+   appended when not already contained. With no indexed chunks this step does nothing.
+8. **Retrieve context.** `retrieve_context_for_grading()` runs hybrid search on `keys_{exam_id}` (query: question id + model
+   answer) and lists the sheet chunks for the question, then formats a KEY SIDE / STUDENT SIDE block of at most ~3,600
+   characters. That block is the only place the student's answer appears in the LLM prompt.
+9. **Score.** `score_answer_llm()`: if `GRADE_ENABLE_LLM` is off → legacy cosine score; else `GRADE_LLM_MOCK_RESPONSE` (tests) →
    Gemini → OpenRouter → legacy. The prompt is `prompts/grading_v2.txt`; the output is rubric JSON with marks, feedback and
    confidence.
-9. **Persist.** Per-question answers go to `sheet_question_answers`; the whole result, with prompt hash and model label, goes to
+10. **Persist.** Per-question answers go to `sheet_question_answers`; the whole result, with prompt hash and model label, goes to
    `evaluation_results`.
-10. **Review.** The evaluator page shows each region over its page image; a teacher can patch a question's marks and feedback.
-11. **Report.** `GET /report/{id}/pdf` builds the ReportLab PDF.
+11. **Review.** The evaluator page shows each region over its page image; a teacher can patch a question's marks and feedback.
+12. **Report.** `GET /report/{id}/pdf` builds the ReportLab PDF.
 
 ## Data
 | Table / path | What it holds |
 |---|---|
 | `answer_keys` | question id, model answer, max marks, sort order, per exam |
-| `answer_key_chunks`, `rag_chunks` | embedded text chunks (128-D hash vectors by default) with FTS |
+| `answer_key_chunks` | per-key model-answer chunks and 128-D vectors (no FTS index; not queried at grading time) |
+| `rag_chunks` | the retrieval corpus: `keys_{exam_id}` copied from `answer_key_chunks`, `sheet_{sheet_id}` from sheet ingest; HNSW + FTS indexes |
 | `sheets` | file path, exam id, `question_regions` JSONB |
 | `sheet_question_answers` | OCR text and extracted answer per question |
 | `evaluation_results` | per-question scores, rubric breakdown, total, confidence, prompt hash |
@@ -53,5 +61,24 @@ only a rough signal. Agreement with human examiners has not been measured.
 - **Vision `ACCOUNT_STATE_INVALID`**: the key belongs to a Gemini-only project → use a project with the Vision API enabled.
 - **Scores look like similarity percentages**: the LLM is off or both providers failed; the result's model label is
   `fallback-legacy` → check `GRADE_ENABLE_LLM` and keys, then `/api/integrations`.
+- **STUDENT SIDE says "no additional sheet chunks retrieved"**: the sheet was uploaded through the portal and never indexed →
+  `POST /api/sheet/{id}/ingest`, then evaluate with `force_regrade: true`.
 - **Stale grade after editing a key's text, the prompt or a provider setting**: the cache ignores those (it checks only key
   count, layout and the `segmentation_v3` flag) → evaluate with `force_regrade: true`.
+
+## Known gaps in retrieval
+Found by reading the code on 2026-11-08; none of these is fixed yet. They are why "Hybrid retrieval" is **Partial** in
+[`product.md`](../product.md).
+
+| # | Gap | Where | Effect on grading |
+|---|---|---|---|
+| 1 | Job uploads say `sheet_ingest: deferred, reason: ocr_at_evaluate`, but `run_evaluation()` never calls `ingest_sheet_rag()` | `jobs.py`, `evaluation_service.py` | For every portal upload the `sheet_{sheet_id}` corpus is empty: no STUDENT SIDE excerpts, no `sheet_rag_by_question` flag, empty Inspect page |
+| 2 | When a sheet *was* indexed (sync routes, `/api/sheet/{id}/ingest`), the chunks are a snapshot. Ingest reads only `GRADE_OCR_FULL_PAGE` (not render scale, patch size or padding), never uses consensus OCR, and is not refreshed by `force_regrade` or a layout change | `rag/ingest.py` (`_preprocess_options_from_env`) vs `preprocessing.preprocess_options_from_env` | Evaluate merges old chunk text into fresh OCR (step 7) and shows it as STUDENT SIDE, so the LLM can see two different transcripts of the same answer |
+| 3 | Full-text half of hybrid search rarely matches during grading: `plainto_tsquery` ANDs every term, and the grading queries add words that never occur in chunks ("reference", "handwritten") plus the whole model answer | `db.search_rag_chunks_bm25`, `retrieval._key_corpus_query`, `_sheet_corpus_query` | Grading retrieval is effectively vector-only. The Inspect page uses short queries, so FTS works there, and what you see is not what grading gets |
+| 4 | The fused rank is discarded: hybrid results are re-sorted by cosine similarity and filtered at `GRADE_RAG_SIM_THRESHOLD` | `db.hybrid_search_rag_chunks` → `annotate_hits_with_similarity` | RRF only chooses the candidate set; ordering is pure vector similarity |
+| 5 | The grading context is cut at `max_chars + 400` (3,600) characters **after** the full model answer and full OCR text are written, and the student answer appears nowhere else in the prompt | `retrieval.format_grading_context`, `llm_providers.build_grading_user_prompt` | With a long model answer and a long student answer, the end of the student's answer and the instructions block are dropped. Reproduced: 1,800-char key + 2,176-char answer loses the answer's last words |
+| 6 | KEY SIDE excerpts prefer the same `question_id` but do not exclude other questions' key chunks | `retrieval._hits_for_question` | Another question's model answer can appear under "Question N" if it passes the similarity threshold |
+| 7 | `/api/rag/search` with `exam_id` but no `sheet_id` searches every document, takes the global top *k*, then drops other exams | `api.api_rag_search` | The Inspect page can show fewer than *k* results, or none, for an exam that has matches |
+
+Suggested order to fix: 5 (score correctness), then 1 (ingest at the start of evaluate, using the evaluate preprocessing
+options, which also fixes 2), then 3 and 6 (build FTS queries from keywords with `OR`; filter key hits to the question), then 7.

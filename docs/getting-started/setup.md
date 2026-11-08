@@ -22,9 +22,12 @@ docker compose up -d          # Postgres on host port 5433 (avoids a local 5432)
 docker compose ps             # wait for "healthy"
 ```
 **Create the schema once on a fresh database.** The API only re-applies the schema at startup when the core tables already
-exist, so an empty database needs one manual call (or apply `backend/supabase/migrations/` for Supabase):
+exist, so an empty database needs one manual call after you create `backend/.env` below (importing `autograder.api` loads it;
+`autograder.db` alone does not). On Supabase, applying `backend/supabase/migrations/` is not enough on its own: some tables
+exist only in `db.py`, so run this once there too:
 ```bash
-PYTHONPATH=src GRADE_DATABASE_URL=postgresql://grade:grade@127.0.0.1:5433/grade_test   python -c "from autograder.db import init_db; init_db()"
+cd backend
+PYTHONPATH=src python -c "import autograder.api; from autograder.db import init_db; init_db()"
 ```
 
 ### Backend (FastAPI)
