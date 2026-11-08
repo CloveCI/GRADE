@@ -543,7 +543,7 @@ def _ocr_cloud(image: np.ndarray) -> OCRResult:
 
 # PaddleOCR builds its detection + recognition models on construction (seconds), so reuse one instance.
 _paddle_ocr_instance = None
-_paddle_ocr_owner: Optional[int] = None
+_paddle_ocr_owner = None  # the PaddleOCR class that built the instance (held, so its id cannot be reused)
 
 
 def _paddle_major_version(module) -> int:
@@ -556,10 +556,9 @@ def _paddle_major_version(module) -> int:
 
 def _get_paddle_ocr(module):
     global _paddle_ocr_instance, _paddle_ocr_owner
-    owner = id(module.PaddleOCR)
-    if _paddle_ocr_instance is not None and _paddle_ocr_owner == owner:
-        return _paddle_ocr_instance
     PaddleOCR = module.PaddleOCR
+    if _paddle_ocr_instance is not None and _paddle_ocr_owner is PaddleOCR:
+        return _paddle_ocr_instance
     if _paddle_major_version(module) >= 3:
         # 3.x removed use_angle_cls/show_log and the cls= argument. Strips are already deskewed upright,
         # so the document-orientation, unwarping and text-line-orientation models are not needed.
@@ -577,7 +576,7 @@ def _get_paddle_ocr(module):
             if "show_log" not in str(e).lower():
                 raise
             inst = PaddleOCR(use_angle_cls=True, lang="en")
-    _paddle_ocr_instance, _paddle_ocr_owner = inst, owner
+    _paddle_ocr_instance, _paddle_ocr_owner = inst, PaddleOCR
     return inst
 
 
