@@ -1,0 +1,17 @@
+# Normalise text files to LF in the repository. Existing CRLF files are converted when they are next touched
+# (or in one go with `git add --renormalize .` in a dedicated commit).
+* text=auto
+
+*.sh text eol=lf
+*.mjs text eol=lf
+scripts/githooks/* text eol=lf
+
+# Binary assets: never diff or merge as text.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.webp binary
+*.pdf binary
+*.zip binary
+*.docx binary
+*.ico binary
