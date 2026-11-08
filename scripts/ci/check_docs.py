@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Keep the documentation honest.
 
-Checks, for the maintained markdown (root *.md, docs/ except docs/_legacy, clients/, .github/):
+Checks, for the maintained markdown (root *.md, docs/ except docs/_legacy, backend/, frontend/, .github/):
   1. every relative link points at a file or directory that exists;
   2. every `#anchor` on a link to a markdown file matches a heading in that file (GitHub's slug rules);
   3. every page under docs/ carries a "Last verified: YYYY-MM-DD" line near the top
@@ -21,9 +21,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 STALE_DAYS = 180
 
-CHECKED_PREFIXES = ("docs/", "clients/", ".github/")
+CHECKED_PREFIXES = ("docs/", "backend/", "frontend/", ".github/")
 SKIP_PREFIXES = ("docs/_legacy/",)
-VERIFIED_EXEMPT_PREFIXES = ("docs/_legacy/", "docs/reference/")  # TEMPLATE: add generated or third-party doc folders
+VERIFIED_EXEMPT_PREFIXES = ("docs/_legacy/", "docs/reference/")
 LINK = re.compile(r"(?<!\!)\[[^\]]*\]\(([^)\s]+)(?:\s+\"[^\"]*\")?\)")
 VERIFIED = re.compile(r"Last verified:\*{0,2}\s*(\d{4}-\d{2}-\d{2})")
 FENCE = re.compile(r"^\s*(```|~~~)")
@@ -36,7 +36,7 @@ def tracked_markdown() -> list[str]:
     for p in files:
         if p.startswith(SKIP_PREFIXES):
             continue
-        if "/" not in p or p.startswith(CHECKED_PREFIXES):  # root files, docs/, clients/, .github/
+        if "/" not in p or p.startswith(CHECKED_PREFIXES):  # root files, docs/, component READMEs, .github/
             keep.append(p)
     return sorted(set(keep))
 

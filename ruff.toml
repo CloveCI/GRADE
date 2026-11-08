@@ -1,0 +1,7 @@
+# Deliberately narrow so the gate is green on day one: syntax errors and undefined names only.
+# Widen in a separate PR (e.g. add "F" then "E") once the existing findings are cleared.
+target-version = "py310"
+extend-exclude = ["backend/.dist", "docs/_legacy"]
+
+[lint]
+select = ["E9", "F63", "F7", "F82"]
