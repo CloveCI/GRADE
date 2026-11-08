@@ -27,7 +27,7 @@ api = [
     "psycopg[binary]>=3.2.0",
     "pgvector>=0.3.0",
 ]
-dev = ["pytest>=7.0.0", "pytest-cov>=4.0.0"]
+dev = ["pytest>=7.0.0", "pytest-cov>=4.0.0", "httpx>=0.24.0"]  # httpx: starlette TestClient
 postgres = [
     "psycopg[binary]>=3.2.0",
     "pgvector>=0.3.0",

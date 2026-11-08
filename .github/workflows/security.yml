@@ -1,0 +1,53 @@
+name: Security
+
+# gitleaks blocks a merge: a new secret must never land. If the history already holds findings, record them in
+# .github/security/gitleaks-baseline.json (gitleaks git . --report-path .github/security/gitleaks-baseline.json --redact)
+# and add --baseline-path to both scan steps, so only NEW findings fail. Rotate the old credentials anyway.
+# Add report-only scanners (Trivy, pip-audit, npm audit, bandit) as separate jobs; make them blocking once the backlog clears.
+
+on:
+  push:
+    branches: [main, staging]
+  pull_request:
+  schedule:
+    - cron: "23 4 * * 1" # Mondays: full-history scan
+  workflow_dispatch:
+
+concurrency:
+  group: security-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  secrets:
+    name: Secret scan (gitleaks)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      # A pinned, checksum-verified binary: no extra token permissions, and the same command runs locally.
+      GITLEAKS_VERSION: "8.30.1"
+      GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install gitleaks
+        run: |
+          curl -fsSL -o gitleaks.tgz "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  gitleaks.tgz" | sha256sum -c -
+          tar -xzf gitleaks.tgz gitleaks
+          sudo mv gitleaks /usr/local/bin/gitleaks
+      - name: Scan the commits this PR adds
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: >
+          gitleaks git . --config .github/security/gitleaks.toml --redact --no-banner --exit-code 1
+          --log-opts="${BASE_SHA}..${HEAD_SHA}"
+      - name: Scan the full history
+        if: github.event_name != 'pull_request'
+        run: gitleaks git . --config .github/security/gitleaks.toml --redact --no-banner --exit-code 1

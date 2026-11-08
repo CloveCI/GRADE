@@ -1,0 +1,30 @@
+name: Promotion guard
+
+# main is the version that gets demoed and handed in. The only way into main is a promotion PR from staging, so
+# whatever reached main has already been integrated and checked on staging. Hotfixes go through the same path; a repository admin can
+# bypass the ruleset in a genuine emergency.
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, reopened, synchronize, edited]
+
+permissions:
+  contents: read
+
+jobs:
+  only-staging:
+    name: Only staging can merge into main
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: The head branch must be staging
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+        run: |
+          if [ "$HEAD_REF" != "staging" ]; then
+            echo "::error::PRs into main must come from the staging branch (this one is from '$HEAD_REF')."
+            echo "Open your PR against staging instead, then promote staging to main with a PR."
+            exit 1
+          fi
+          echo "ok: promotion PR from staging"

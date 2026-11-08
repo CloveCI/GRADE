@@ -1,0 +1,25 @@
+name: Stale
+
+on:
+  schedule:
+    - cron: "30 2 * * *"
+  workflow_dispatch:
+
+permissions:
+  issues: write
+  pull-requests: write
+
+jobs:
+  stale:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/stale@5bef64f19d7facfb25b37b414482c7164d639639 # v9
+        with:
+          days-before-stale: 45
+          days-before-close: 14
+          stale-issue-message: "No activity for 45 days. Closing in 14 days unless someone comments."
+          stale-pr-message: "No activity for 45 days. Closing in 14 days unless someone pushes or comments."
+          exempt-issue-labels: "pinned,security,production-health"
+          exempt-pr-labels: "pinned,security,dependencies"
+          operations-per-run: 60
