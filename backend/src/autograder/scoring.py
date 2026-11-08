@@ -6,7 +6,7 @@ import logging
 import os
 import re
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from autograder.embeddings import cosine_similarity, embed_text_local
 from autograder.llm_providers import (
@@ -204,6 +204,7 @@ def score_answer_llm(
             return _legacy_fallback_score(student_answer, model_answer, max_marks), model_name
 
     last_error: Optional[Exception] = None
+    failed: List[Tuple[str, Exception]] = []  # providers that were tried and failed, in order
     gkey = gemini_api_key()
     if gkey:
         try:
@@ -225,6 +226,7 @@ def score_answer_llm(
             return res.model_copy(update={"flags": flags}), model_name
         except Exception as exc:
             last_error = exc
+            failed.append(("gemini", exc))
             logger.warning("Gemini grading failed: %s", exc)
 
     if openrouter_fallback_enabled():
@@ -247,13 +249,14 @@ def score_answer_llm(
             return res.model_copy(update={"flags": flags}), f"openrouter:{or_model}"
         except Exception as exc:
             last_error = exc
+            failed.append(("openrouter", exc))
             logger.warning("OpenRouter grading failed: %s", exc)
 
+    # Every provider failed or none is configured: the marks below come from the similarity fallback, so label
+    # them that way (not with the Gemini model name) and flag only the providers that were actually tried.
     fb = _legacy_fallback_score(student_answer, model_answer, max_marks)
-    hints: List[str] = []
-    if last_error:
-        hints.append(_provider_error_hint("openrouter", last_error))
-    elif not gkey and not openrouter_fallback_enabled():
+    hints = [_provider_error_hint(provider, exc) for provider, exc in failed]
+    if not failed:
         hints.append(
             "Set GRADE_GEMINI_API_KEY and/or GRADE_OPENROUTER_API_KEY in .env and restart the API."
         )
@@ -262,9 +265,9 @@ def score_answer_llm(
             "feedback": f"{fb.feedback} {' '.join(hints)}".strip(),
             "flags": list(
                 dict.fromkeys(
-                    list(fb.flags) + ["gemini_error", "openrouter_error", "review_required"]
+                    list(fb.flags) + [f"{provider}_error" for provider, _ in failed] + ["review_required"]
                 )
             ),
         }
     )
-    return fb, model_name
+    return fb, "fallback-legacy"

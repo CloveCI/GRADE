@@ -121,6 +121,57 @@ class TestScoreAnswerLlmEnv:
         )
         assert "llm_unavailable" in res.flags
 
+    def test_openrouter_only_rejected_key_is_labelled_fallback(self, monkeypatch):
+        """OpenRouter-only setup whose key is rejected: marks come from the similarity fallback and must say so."""
+        monkeypatch.setenv("GRADE_ENABLE_LLM", "true")
+        monkeypatch.delenv("GRADE_GEMINI_API_KEY", raising=False)
+        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+        monkeypatch.setenv("GRADE_OPENROUTER_API_KEY", "sk-or-v1-revoked")
+        monkeypatch.delenv("GRADE_LLM_MOCK_RESPONSE", raising=False)
+
+        def _reject(**_kwargs):
+            raise RuntimeError('OpenRouter HTTP 401: {"error":{"message":"User not found.","code":401}}')
+
+        monkeypatch.setattr("autograder.scoring._score_with_openrouter", _reject)
+        res, label = score_answer_llm(
+            student_answer="student text",
+            model_answer="model text",
+            max_marks=5.0,
+            question_text="Q1",
+            subject_domain="general",
+            ocr_confidence=0.8,
+        )
+        assert label == "fallback-legacy"
+        assert "openrouter_error" in res.flags
+        assert "gemini_error" not in res.flags
+        assert "openrouter error" in res.feedback and "401" in res.feedback
+
+    def test_both_providers_fail_names_both(self, monkeypatch):
+        monkeypatch.setenv("GRADE_ENABLE_LLM", "true")
+        monkeypatch.setenv("GRADE_GEMINI_API_KEY", "fake-gemini")
+        monkeypatch.setenv("GRADE_OPENROUTER_API_KEY", "fake-or")
+        monkeypatch.delenv("GRADE_LLM_MOCK_RESPONSE", raising=False)
+
+        def _gemini_down(**_kwargs):
+            raise RuntimeError("gemini exploded")
+
+        def _openrouter_down(**_kwargs):
+            raise RuntimeError("openrouter exploded")
+
+        monkeypatch.setattr("autograder.scoring._score_with_gemini", _gemini_down)
+        monkeypatch.setattr("autograder.scoring._score_with_openrouter", _openrouter_down)
+        res, label = score_answer_llm(
+            student_answer="student text",
+            model_answer="model text",
+            max_marks=5.0,
+            question_text="Q1",
+            subject_domain="general",
+            ocr_confidence=0.8,
+        )
+        assert label == "fallback-legacy"
+        assert {"gemini_error", "openrouter_error"} <= set(res.flags)
+        assert "gemini error" in res.feedback and "openrouter error" in res.feedback
+
     def test_openrouter_fallback_when_gemini_fails(self, monkeypatch):
         monkeypatch.setenv("GRADE_ENABLE_LLM", "true")
         monkeypatch.setenv("GRADE_GEMINI_API_KEY", "fake-gemini")
