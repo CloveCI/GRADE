@@ -194,12 +194,12 @@ def _preprocess_options_from_env() -> dict:
 
 
 def _load_dotenv() -> None:
-    """Load `.env`: repo root (always), then current working directory (optional overrides)."""
+    """Load `.env`: backend/ (always), then current working directory (optional overrides)."""
     try:
         from dotenv import load_dotenv
     except ImportError:
         return
-    # src/autograder/api.py -> parents[2] is repository root (where pyproject.toml lives).
+    # src/autograder/api.py -> parents[2] is backend/ folder (where pyproject.toml lives).
     repo_root = Path(__file__).resolve().parents[2]
     try:
         load_dotenv(repo_root / ".env", interpolate=False, override=True)

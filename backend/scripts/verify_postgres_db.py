@@ -3,10 +3,10 @@
 Smoke-test PostgreSQL / Supabase storage (pgvector) for GRADE.
 
 Requires:
-  - GRADE_DATABASE_URL or DATABASE_URL in the environment (or in repo-root ``.env``)
+  - GRADE_DATABASE_URL or DATABASE_URL in the environment (or in backend/ ``.env``)
   - ``pip install -e ".[postgres]"``
 
-Usage (from repo root):
+Usage (from backend/):
   set PYTHONPATH=src
   python scripts/verify_postgres_db.py
   python scripts/verify_postgres_db.py --no-cleanup
@@ -43,7 +43,7 @@ def _parse_env_file_line(line: str) -> tuple[str, str] | None:
 
 def _load_database_urls_from_repo_env_file() -> None:
     """
-    Read GRADE_DATABASE_URL / DATABASE_URL from repo-root .env without ``$`` interpolation.
+    Read GRADE_DATABASE_URL / DATABASE_URL from backend/ .env without ``$`` interpolation.
 
     python-dotenv expands ``$VAR`` inside values by default, which breaks passwords containing ``$``.
     This runs before dotenv so a URL like ``...postgres:$MyPass$@host...`` stays intact.

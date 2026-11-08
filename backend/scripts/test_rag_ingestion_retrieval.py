@@ -10,7 +10,7 @@ Exercises the same path as POST /evaluate (without LLM grading):
 
 Requires ``GRADE_DATABASE_URL`` (or ``DATABASE_URL``) and ``pip install -e ".[postgres]"``.
 
-Usage (from repo root):
+Usage (from backend/):
   set PYTHONPATH=src
   python scripts/test_rag_ingestion_retrieval.py
   python scripts/test_rag_ingestion_retrieval.py --exam-id midterm --sheet-id <uuid>

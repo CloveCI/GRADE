@@ -2,7 +2,7 @@
 """
 Exercise GRADE components individually (local checks + optional live calls).
 
-Usage (from repo root):
+Usage (from backend/):
   PYTHONPATH=src python scripts/test_components.py
   PYTHONPATH=src python scripts/test_components.py --live-ocr path/to/patch.png
   PYTHONPATH=src python scripts/test_components.py --live-gemini

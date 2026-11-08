@@ -2,7 +2,7 @@
 """
 Parse answer-key PDFs with the same logic as POST /upload/key/file (pypdf + key_pdf).
 
-Default files (repo root):
+Default files (from backend/):
   docs/Key.pdf
   DocScanner*.pdf (e.g. phone scan; often has no text layer)
 
@@ -61,7 +61,7 @@ def main() -> int:
         "pdfs",
         nargs="*",
         type=Path,
-        help="PDF paths (default: docs/Key.pdf and DocScanner*.pdf under repo root)",
+        help="PDF paths (default: docs/Key.pdf and DocScanner*.pdf under backend/)",
     )
     parser.add_argument("--exam-id", default="verify-key-pdf", help="Synthetic exam_id for parsing")
     parser.add_argument("--default-marks", type=float, default=4.0)
