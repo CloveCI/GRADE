@@ -1,4 +1,7 @@
-# Whole-PDF OCR and Chunking Runbook
+# Whole-PDF OCR and chunking runbook
+
+> **Audience:** developers inspecting OCR quality or loading chunks by hand · **Scope:** `backend/scripts/show_grade_workflow.py`
+> and `run_ocr_chunk_store.ps1` · **Last verified:** 2026-11-08 (script paths and options checked; not re-run with live OCR)
 
 This guide explains how to run the GRADE workflow script that renders a PDF, OCRs every page, records OCR confidence, and builds document-level chunks.
 
@@ -12,7 +15,7 @@ The script processes the whole PDF by default. Use `--page N` only when you want
 
 ## One-Time Setup
 
-From the repository root:
+From `backend/` (every command below runs there):
 
 ```powershell
 $env:PYTHONPATH = "src"
@@ -27,10 +30,10 @@ python -m pip install -e ".[api,ocr_google]"
 This workspace also supports local script dependencies in:
 
 ```text
-.dist\python
+backend\.dist\python
 ```
 
-The workflow script automatically loads `.dist\python` when it exists.
+The workflow script automatically loads `backend\.dist\python` when it exists.
 
 ## Demo Run Without OCR Credentials
 
