@@ -17,7 +17,7 @@ the API. The schema only ever adds tables and columns, so older code runs agains
 cd backend
 docker compose down -v && docker compose up -d     # wipes the database volume
 rm -rf data/uploads data/previews                  # uploaded sheets and previews
-PYTHONPATH=src python -c "from autograder.db import init_db; init_db()"
+PYTHONPATH=src python -c "import autograder.api; from autograder.db import init_db; init_db()"
 ```
 
 ## Incidents
@@ -25,8 +25,9 @@ PYTHONPATH=src python -c "from autograder.db import init_db; init_db()"
 |---|---|---|
 | `/health` says `degraded`, uploads return 503 | Postgres down, wrong `GRADE_DATABASE_URL`, or empty schema | `docker compose ps`; check `/api/database/status`; run `init_db()` |
 | `password authentication failed for user "grade"` on 5433 | Another Postgres already owns port 5433 | Stop it, or change the host port in `docker-compose.yml` and the URL |
-| Supabase connection fails or resolves to IPv6 | Pooler / DNS issue | `PYTHONPATH=src python scripts/diagnose_pg_dns.py`; see `GRADE_PG_PREFER_ADDR_FAMILY` in `.env.example` |
+| Supabase connection fails or resolves to IPv6 | Pooler / DNS issue | `PYTHONPATH=src python scripts/diagnose_pg_dns.py`; `GRADE_PG_PREFER_ADDR_FAMILY`, `GRADE_PG_SKIP_HOSTADDR_RESOLVE` and `GRADE_DATABASE_HOSTADDR` are read in `db.py` (not yet in `.env.example`) |
 | Job stuck at a stage | API restarted mid-job (jobs are in-process threads) | Start the job again from the portal |
 | OCR text empty | No OCR engine configured | Set `GOOGLE_APPLICATION_CREDENTIALS`; check `/api/integrations` |
 | Scores from `fallback-legacy` | LLM disabled or both providers failed | Set `GRADE_ENABLE_LLM=true` and a Gemini or OpenRouter key; check the API log |
+| Inspect page / `/api/sheet/{id}/chunks` shows no sheet chunks | Sheet uploaded through the portal (job routes never index it) | `POST /api/sheet/{id}/ingest` |
 | Evaluator shows no page images | Previews missing for the sheet | Open the sheet preview with `rebuild=true` (`/api/sheet/{id}/preview?rebuild=true`) |

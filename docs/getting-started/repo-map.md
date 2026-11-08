@@ -33,8 +33,8 @@ backend/
     scoring.py           rubric scoring: mock, Gemini, OpenRouter, legacy cosine fallback
     llm_providers.py     provider keys, model names, prompt builders
     prompts/             grading_v2.txt, ocr_format_v1.txt
-    rag/                 ingest, retrieval (pgvector + FTS), answer-boundary trimming, similarity
-    embeddings.py        128-D local hash embeddings, optional Sentence-Transformers
+    rag/                 ingest (rag_chunks), retrieval (pgvector + FTS), similarity; boundaries.py (scripts/tests only)
+    embeddings.py        128-D vectors: MiniLM projected from 384-D when sentence-transformers is installed, hash otherwise
     db.py                Postgres access and the idempotent schema (init_db)
     key_docx.py, key_pdf.py, key_chunks.py   answer-key parsing and chunking
     report_pdf.py        ReportLab PDF report

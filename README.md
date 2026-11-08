@@ -2,12 +2,14 @@
 
 **GRADE (Generalized Recognition and Automated Document Evaluator) grades handwritten exam answer sheets for teachers.**
 Marking open-ended handwritten answers is slow and inconsistent. GRADE splits each scanned sheet into answer regions, reads the
-handwriting with OCR, retrieves the matching model answer, and scores every question against a rubric with an LLM, so the
+handwriting with OCR, pairs each region with its answer-key question by position, and scores every question against a rubric
+with an LLM (with retrieved key and sheet excerpts as extra evidence), so the
 examiner reviews and corrects grades instead of producing them from scratch.
 
 - **Ingest**: answer keys as Word `.docx`, JSON or text PDF; student sheets as PDF or image.
 - **Read**: OpenCV strip segmentation with per-exam layouts, then tiered OCR (Google Vision first; Azure, PaddleOCR, TrOCR as fallbacks).
-- **Score**: hybrid retrieval (pgvector + full-text) and rubric grading with Gemini, OpenRouter as fallback, similarity score when the LLM is off.
+- **Score**: rubric grading with Gemini, OpenRouter as fallback, similarity score when the LLM is off; retrieval (pgvector + full-text
+  over `rag_chunks`) adds key and sheet excerpts to the prompt.
 - **Review**: a React portal with region previews, per-question score correction, and a PDF report.
 
 > **Status.** Works end to end on the bundled CIE sample sheets with Google Vision and Gemini configured; runs locally only,
@@ -18,7 +20,7 @@ examiner reviews and corrects grades instead of producing them from scratch.
 flowchart LR
   A[Upload key + sheet] --> B[Segment strips per layout]
   B --> C[OCR per region]
-  C --> D[Retrieve model answer + trim boundaries]
+  C --> D[Retrieve key + sheet excerpts]
   D --> E[LLM rubric score]
   E --> F[Review in portal + PDF report]
 ```
@@ -46,7 +48,7 @@ cd backend
 docker compose up -d                                   # Postgres 16 + pgvector on port 5433
 pip install -e ".[api,ocr_google,llm_gemini,dev]"
 cp .env.example .env                                   # set GRADE_DATABASE_URL, Vision credentials, Gemini key
-PYTHONPATH=src python -c "from autograder.db import init_db; init_db()"   # once, on a fresh database
+PYTHONPATH=src python -c "import autograder.api; from autograder.db import init_db; init_db()"   # once, on a fresh database (importing the API loads .env)
 PYTHONPATH=src python -m uvicorn autograder.api:app --host 127.0.0.1 --port 8000
 
 cd ../frontend && npm ci && npm run dev                # http://127.0.0.1:5173
@@ -68,7 +70,7 @@ docs/                documentation
 |---|---|
 | Preprocessing | OpenCV: deskew, ink-aware horizontal strip segmentation, multi-page merge |
 | OCR / HTR | Google Cloud Vision, Azure AI Vision, PaddleOCR, TrOCR |
-| Retrieval | Local 128-D hash embeddings (Sentence-Transformers optional), pgvector + Postgres FTS |
+| Retrieval | 128-D embeddings (MiniLM via Sentence-Transformers when installed, deterministic hash otherwise), pgvector + Postgres FTS |
 | Scoring | Gemini, OpenRouter fallback, cosine-similarity fallback |
 | Backend | FastAPI with background jobs (`/jobs/*`, polled by the UI) |
 | Frontend | React 19, React Router 7, Vite 8 |

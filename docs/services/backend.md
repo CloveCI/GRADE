@@ -28,7 +28,8 @@ answer keys, sheets, grading and reports, and is the only component that talks t
 Environment variables only; `backend/.env.example` documents each one. The ones that matter most:
 `GRADE_DATABASE_URL` (required), `GOOGLE_APPLICATION_CREDENTIALS` or `GOOGLE_CLOUD_VISION_API_KEY` (OCR),
 `GRADE_ENABLE_LLM` + `GRADE_GEMINI_API_KEY` / `GRADE_OPENROUTER_API_KEY` (scoring), `GRADE_CORS_ORIGINS`,
-`GRADE_EMBED_BACKEND=hash` (deterministic embeddings). Optional dependency groups in `pyproject.toml`: `api`, `dev`,
+`GRADE_EMBED_BACKEND` (`minilm` is used automatically when `sentence-transformers` is installed; `hash` forces deterministic
+vectors), `GRADE_RAG_SIM_THRESHOLD` / `GRADE_RAG_SIM_TEMPERATURE` (retrieval filtering). Optional dependency groups in `pyproject.toml`: `api`, `dev`,
 `ocr_google`, `ocr_azure`, `ocr_paddle`, `ocr_trocr`, `llm_gemini`, `embeddings`, `all`.
 
 ## Run
@@ -48,3 +49,5 @@ API and RAG tests fail with `OperationalError` or 503 when it is not running.
 - **Port 5433 already in use:** another Postgres on 5433 gives `password authentication failed for user "grade"`.
 - **Jobs are in-process threads:** restarting the API abandons running jobs; their rows stay `running`.
 - **No auth:** bind to `127.0.0.1`; do not expose the API publicly.
+- **Changing the embedding backend** (installing or removing `sentence-transformers`) leaves vectors from the old backend in
+  `answer_key_chunks` / `rag_chunks`; re-upload keys and re-ingest sheets, or similarity scores stop meaning anything.

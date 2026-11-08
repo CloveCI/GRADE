@@ -35,6 +35,10 @@ backend\.dist\python
 
 The workflow script automatically loads `backend\.dist\python` when it exists.
 
+The examples below use `DocScanner 3 Apr 2026 12-56*.pdf`, a private scan that is gitignored and not in the repository.
+Substitute any sheet you have, e.g. `"cie\sheets\DATA MINING.pdf"`. `run_ocr_chunk_store.ps1` defaults to the same
+DocScanner name, so pass `-Pdf` explicitly.
+
 ## Demo Run Without OCR Credentials
 
 Use mock OCR to verify PDF rendering, preprocessing, confidence display, and chunking without Google Vision, Azure, PaddleOCR, or TrOCR:
@@ -69,7 +73,8 @@ Then run:
 python scripts\show_grade_workflow.py "DocScanner 3 Apr 2026 12-56*.pdf" --full-page -o extraction.json
 ```
 
-If `GRADE_DATABASE_URL` is set in `.env`, the script also embeds the generated chunks and upserts them into:
+If `GRADE_DATABASE_URL` is set in `.env`, the script also embeds the generated chunks and upserts them into the table below.
+They are stored under the script's own document id, not `sheet_{sheet_id}`, so the grading pipeline never reads them:
 
 ```text
 public.rag_chunks
@@ -210,7 +215,7 @@ Check the workflow without live OCR:
 python scripts\show_grade_workflow.py "DocScanner 3 Apr 2026 12-56*.pdf" --mock-ocr --full-page --chunk-size 120 --chunk-overlap 20
 ```
 
-Expected behavior for the included sample PDF:
+Expected behavior for a multi-page sample sheet:
 
 - all pages are processed
 - one region per page with `--full-page`
