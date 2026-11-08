@@ -53,6 +53,33 @@ def test_format_grading_context_side_by_side():
     assert out["chunk_ids"]
 
 
+def test_format_grading_context_never_cuts_the_student_answer():
+    """A 7-mark key (~3.5k chars) plus a long answer used to be sliced at max_chars + 400, so the LLM got no answer."""
+    model = "Hydro-meteorological disasters are caused by atmospheric processes. " * 55  # ~3.7k chars
+    student = ("floods cyclones droughts heat waves early warning. " * 24) + "FINAL_STUDENT_WORDS"
+    excerpt = {
+        "chunk_id": "key_x",
+        "document_id": "keys_exam1",
+        "text_content": "Model answer excerpt: shelters and evacuation. " * 10,
+        "meta": {"kind": "answer_key", "question_id": "Q5"},
+    }
+    out = format_grading_context(
+        question_id="Q5",
+        model_answer=model,
+        student_ocr=student,
+        key_hits=[excerpt],
+        sheet_hits=[],
+        max_chars=3200,
+    )
+    text = out["context_text"]
+    assert model.strip() in text
+    assert "FINAL_STUDENT_WORDS" in text
+    assert "=== INSTRUCTIONS ===" in text
+    # the excerpt budget is what gives way when the essentials are long
+    assert "shelters and evacuation" not in text
+    assert "(no additional key chunks retrieved)" in text
+
+
 def test_retrieve_context_for_grading_monkeypatch(monkeypatch):
     """Uses separate key and sheet searches (mocked)."""
 

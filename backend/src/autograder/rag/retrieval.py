@@ -186,6 +186,10 @@ def format_grading_context(
 
     KEY SIDE = official answer + retrieved key RAG chunks.
     STUDENT SIDE = OCR + retrieved sheet RAG chunks for the same exam.
+
+    ``max_chars`` budgets only the retrieved excerpts. The model answer, the student's OCR text and the
+    instructions are always included in full: this block is the only place the student's answer reaches
+    the LLM, so cutting it would grade a truncated (or missing) answer.
     """
     qid = question_id or "?"
     region_note = ""
@@ -226,7 +230,7 @@ def format_grading_context(
     )
 
     return {
-        "context_text": context_text[: max_chars + 400],
+        "context_text": context_text,
         "chunk_ids": chunk_ids,
         "key_hit_count": len(key_hits),
         "sheet_hit_count": len(sheet_hits),

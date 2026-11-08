@@ -30,8 +30,10 @@ suggest; see [Known gaps in retrieval](#known-gaps-in-retrieval).
    question and slices the fresh OCR by their stored offsets; if that text is longer it replaces the OCR, otherwise it is
    appended when not already contained. With no indexed chunks this step does nothing.
 8. **Retrieve context.** `retrieve_context_for_grading()` runs hybrid search on `keys_{exam_id}` (query: question id + model
-   answer) and lists the sheet chunks for the question, then formats a KEY SIDE / STUDENT SIDE block of at most ~3,600
-   characters. That block is the only place the student's answer appears in the LLM prompt.
+   answer) and lists the sheet chunks for the question, then formats a KEY SIDE / STUDENT SIDE block. The model answer,
+   the student's OCR and the instructions are always included in full; `max_chars` (3,200) budgets only the retrieved
+   excerpts, which are dropped first when the essentials are long. That block is the only place the student's answer
+   appears in the LLM prompt.
 9. **Score.** `score_answer_llm()`: if `GRADE_ENABLE_LLM` is off → legacy cosine score; else `GRADE_LLM_MOCK_RESPONSE` (tests) →
    Gemini → OpenRouter → legacy. The prompt is `prompts/grading_v2.txt`; the output is rubric JSON with marks, feedback and
    confidence.
@@ -67,8 +69,8 @@ suggest; see [Known gaps in retrieval](#known-gaps-in-retrieval).
   count, layout and the `segmentation_v3` flag) → evaluate with `force_regrade: true`.
 
 ## Known gaps in retrieval
-Found by reading the code on 2026-11-08; none of these is fixed yet. They are why "Hybrid retrieval" is **Partial** in
-[`product.md`](../product.md).
+Found by reading the code on 2026-11-08 and confirmed on the Disaster Mitigation sample (local PaddleOCR, MiniLM). Only #5 is
+fixed. The rest are why "Hybrid retrieval" is **Partial** in [`product.md`](../product.md).
 
 | # | Gap | Where | Effect on grading |
 |---|---|---|---|
@@ -76,9 +78,14 @@ Found by reading the code on 2026-11-08; none of these is fixed yet. They are wh
 | 2 | When a sheet *was* indexed (sync routes, `/api/sheet/{id}/ingest`), the chunks are a snapshot. Ingest reads only `GRADE_OCR_FULL_PAGE` (not render scale, patch size or padding), never uses consensus OCR, and is not refreshed by `force_regrade` or a layout change | `rag/ingest.py` (`_preprocess_options_from_env`) vs `preprocessing.preprocess_options_from_env` | Evaluate merges old chunk text into fresh OCR (step 7) and shows it as STUDENT SIDE, so the LLM can see two different transcripts of the same answer |
 | 3 | Full-text half of hybrid search rarely matches during grading: `plainto_tsquery` ANDs every term, and the grading queries add words that never occur in chunks ("reference", "handwritten") plus the whole model answer | `db.search_rag_chunks_bm25`, `retrieval._key_corpus_query`, `_sheet_corpus_query` | Grading retrieval is effectively vector-only. The Inspect page uses short queries, so FTS works there, and what you see is not what grading gets |
 | 4 | The fused rank is discarded: hybrid results are re-sorted by cosine similarity and filtered at `GRADE_RAG_SIM_THRESHOLD` | `db.hybrid_search_rag_chunks` → `annotate_hits_with_similarity` | RRF only chooses the candidate set; ordering is pure vector similarity |
-| 5 | The grading context is cut at `max_chars + 400` (3,600) characters **after** the full model answer and full OCR text are written, and the student answer appears nowhere else in the prompt | `retrieval.format_grading_context`, `llm_providers.build_grading_user_prompt` | With a long model answer and a long student answer, the end of the student's answer and the instructions block are dropped. Reproduced: 1,800-char key + 2,176-char answer loses the answer's last words |
-| 6 | KEY SIDE excerpts prefer the same `question_id` but do not exclude other questions' key chunks | `retrieval._hits_for_question` | Another question's model answer can appear under "Question N" if it passes the similarity threshold |
+| 5 | **Fixed 2026-11-08.** The grading context was cut at `max_chars + 400` (3,600) characters after the full model answer and OCR text were written | `retrieval.format_grading_context` | With the reformatted Disaster Mitigation key (~3.5k-char answers for Q4–Q6) the LLM received no student answer for Q4 and Q6 and 7 characters for Q5, i.e. 21 of 27 marks graded blind. Now only excerpts are budgeted |
+| 6 | KEY SIDE excerpts prefer the same `question_id` but do not exclude other questions' key chunks | `retrieval._hits_for_question` | Seen on all 6 Disaster Mitigation questions: e.g. Q2's KEY SIDE also carried Q1 and Q4 excerpts |
+| 8 | The similarity cut-off removes correct sheet chunks when OCR is noisy, and full-text matches cannot rescue them because filtering uses cosine similarity only | `rag/similarity.filter_hits_by_threshold` (0.35) | "Bhopal methyl isocyanate gas leak": the right Q6 sheet chunk scores 0.32 and is dropped although FTS matches "Bhopal" |
 | 7 | `/api/rag/search` with `exam_id` but no `sheet_id` searches every document, takes the global top *k*, then drops other exams | `api.api_rag_search` | The Inspect page can show fewer than *k* results, or none, for an exam that has matches |
 
-Suggested order to fix: 5 (score correctness), then 1 (ingest at the start of evaluate, using the evaluate preprocessing
-options, which also fixes 2), then 3 and 6 (build FTS queries from keywords with `OR`; filter key hits to the question), then 7.
+Suggested order for the rest: 1 (ingest at the start of evaluate, using the evaluate preprocessing options, which also
+fixes 2), then 3, 6 and 8 (build FTS queries from keywords with `OR`; filter key hits to the question; let an FTS match
+survive the cosine cut-off), then 7.
+
+Positional pairing is the right choice for now: on the same sample, retrieving a key from the student's own words picked
+the wrong question for Q4 (→ Q2) and Q5 (→ Q1), so `match_answer_key()` should stay out of evaluate until OCR improves.
