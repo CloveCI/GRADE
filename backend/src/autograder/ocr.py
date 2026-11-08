@@ -541,6 +541,64 @@ def _ocr_cloud(image: np.ndarray) -> OCRResult:
 # Tier 2 — PaddleOCR (local)
 # ---------------------------------------------------------------------------
 
+# PaddleOCR builds its detection + recognition models on construction (seconds), so reuse one instance.
+_paddle_ocr_instance = None
+_paddle_ocr_owner: Optional[int] = None
+
+
+def _paddle_major_version(module) -> int:
+    """Major version of the imported ``paddleocr`` package (2 when unknown)."""
+    try:
+        return int(str(getattr(module, "__version__", "")).split(".")[0])
+    except ValueError:
+        return 2
+
+
+def _get_paddle_ocr(module):
+    global _paddle_ocr_instance, _paddle_ocr_owner
+    owner = id(module.PaddleOCR)
+    if _paddle_ocr_instance is not None and _paddle_ocr_owner == owner:
+        return _paddle_ocr_instance
+    PaddleOCR = module.PaddleOCR
+    if _paddle_major_version(module) >= 3:
+        # 3.x removed use_angle_cls/show_log and the cls= argument. Strips are already deskewed upright,
+        # so the document-orientation, unwarping and text-line-orientation models are not needed.
+        inst = PaddleOCR(
+            lang="en",
+            use_doc_orientation_classify=False,
+            use_doc_unwarping=False,
+            use_textline_orientation=False,
+        )
+    else:
+        # Some 2.x builds reject show_log.
+        try:
+            inst = PaddleOCR(use_angle_cls=True, lang="en", show_log=False)
+        except Exception as e:
+            if "show_log" not in str(e).lower():
+                raise
+            inst = PaddleOCR(use_angle_cls=True, lang="en")
+    _paddle_ocr_instance, _paddle_ocr_owner = inst, owner
+    return inst
+
+
+def _ocr_paddle_v3(ocr, image: np.ndarray) -> OCRResult:
+    """PaddleOCR 3.x: ``predict()`` returns one result per page with ``rec_texts`` / ``rec_scores``."""
+    if image.ndim == 2:
+        image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+    lines_text: List[str] = []
+    confidences: List[float] = []
+    for page in ocr.predict(image) or []:
+        if page is None:
+            continue
+        texts = page.get("rec_texts") or []
+        scores = page.get("rec_scores") or []
+        for text, score in zip(texts, scores):
+            if str(text).strip():
+                lines_text.append(str(text))
+                confidences.append(float(score))
+    avg_conf = float(np.mean(confidences)) if confidences else 0.0
+    return _make_result("\n".join(lines_text), avg_conf, "paddle")
+
 
 def _ocr_paddle(image: np.ndarray) -> OCRResult:
     """
@@ -553,18 +611,14 @@ def _ocr_paddle(image: np.ndarray) -> OCRResult:
     Reference: [5] PaddlePaddle, PaddleOCR.
     """
     try:
-        from paddleocr import PaddleOCR  # type: ignore
+        import paddleocr as paddleocr_module  # type: ignore
     except ImportError as exc:
         raise RuntimeError("paddleocr not installed.") from exc
 
-    # lang='en' for English; PaddleOCR supports multi-language.
-    # Some PaddleOCR builds reject show_log.
-    try:
-        ocr = PaddleOCR(use_angle_cls=True, lang="en", show_log=False)
-    except Exception as e:
-        if "show_log" not in str(e).lower():
-            raise
-        ocr = PaddleOCR(use_angle_cls=True, lang="en")
+    ocr = _get_paddle_ocr(paddleocr_module)
+    if _paddle_major_version(paddleocr_module) >= 3:
+        return _ocr_paddle_v3(ocr, image)
+
     result = ocr.ocr(image, cls=True)
 
     if not result or result == [None]:

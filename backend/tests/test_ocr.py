@@ -539,6 +539,52 @@ class TestOcrPaddle:
         assert result.text == ""
         assert result.engine == "paddle"
 
+    def _mock_v3_module(self, pages):
+        """PaddleOCR 3.x: no ``cls=`` argument; ``predict()`` returns dict-like pages."""
+        mock_ocr_instance = MagicMock()
+        mock_ocr_instance.predict.return_value = pages
+        mock_ocr_instance.ocr.side_effect = TypeError("PaddleOCR.predict() got an unexpected keyword argument 'cls'")
+        mock_paddleocr_module = MagicMock()
+        mock_paddleocr_module.__version__ = "3.3.2"
+        mock_paddleocr_module.PaddleOCR = MagicMock(return_value=mock_ocr_instance)
+        return mock_paddleocr_module, mock_ocr_instance
+
+    def test_v3_predict_api(self):
+        from autograder.ocr import _ocr_paddle
+
+        module, instance = self._mock_v3_module(
+            [{"rec_texts": ["A hazard is a dangerous event", "", "that can cause harm"], "rec_scores": [0.9, 0.1, 0.7]}]
+        )
+        with patch.dict(sys.modules, {"paddleocr": module}):
+            result = _ocr_paddle(_make_image())
+
+        instance.ocr.assert_not_called()
+        kwargs = module.PaddleOCR.call_args.kwargs
+        assert "use_angle_cls" not in kwargs and "show_log" not in kwargs
+        assert result.engine == "paddle"
+        assert result.text == "A hazard is a dangerous event\nthat can cause harm"
+        assert result.confidence == pytest.approx(0.8)
+
+    def test_v3_grayscale_patch_is_converted(self):
+        from autograder.ocr import _ocr_paddle
+
+        module, instance = self._mock_v3_module([{"rec_texts": ["x"], "rec_scores": [0.9]}])
+        gray = np.full((40, 120), 255, dtype=np.uint8)
+        with patch.dict(sys.modules, {"paddleocr": module}):
+            _ocr_paddle(gray)
+
+        assert instance.predict.call_args.args[0].ndim == 3
+
+    def test_v3_empty_result(self):
+        from autograder.ocr import _ocr_paddle
+
+        module, _ = self._mock_v3_module([])
+        with patch.dict(sys.modules, {"paddleocr": module}):
+            result = _ocr_paddle(_make_image())
+
+        assert result.text == ""
+        assert result.confidence == 0.0
+
     def test_import_error_raises(self):
         from autograder.ocr import _ocr_paddle
 
