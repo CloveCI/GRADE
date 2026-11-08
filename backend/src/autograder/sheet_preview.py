@@ -18,6 +18,8 @@ from autograder.preprocessing import (
     preprocess_options_from_env,
 )
 
+logger = logging.getLogger(__name__)
+
 PREVIEW_RENDER_SCALE = 2.0
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
