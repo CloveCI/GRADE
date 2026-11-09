@@ -32,8 +32,16 @@ from typing import List
 from unittest import mock
 from unittest.mock import MagicMock, patch
 
+import importlib.util
+
 import numpy as np
 import pytest
+
+# The TrOCR tier is optional (the ocr_trocr extra pulls in torch, ~1 GB). These tests run wherever torch is installed
+# and are skipped where it is not, e.g. CI, which installs only the api and dev extras.
+requires_torch = pytest.mark.skipif(
+    importlib.util.find_spec("torch") is None, reason="torch not installed (optional ocr_trocr extra)"
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -175,6 +183,7 @@ class TestImageToBytes:
 
 
 class TestAggregateTrocrConfidence:
+    @requires_torch
     def test_returns_float_in_range(self):
         import torch
         from autograder.ocr import _aggregate_trocr_confidence
@@ -192,6 +201,7 @@ class TestAggregateTrocrConfidence:
         conf = _aggregate_trocr_confidence([])
         assert conf == pytest.approx(0.5)
 
+    @requires_torch
     def test_high_peaked_distribution(self):
         import torch
         from autograder.ocr import _aggregate_trocr_confidence
@@ -202,6 +212,7 @@ class TestAggregateTrocrConfidence:
         conf = _aggregate_trocr_confidence([logits])
         assert conf > 0.99
 
+    @requires_torch
     def test_uniform_distribution(self):
         import torch
         from autograder.ocr import _aggregate_trocr_confidence
@@ -663,6 +674,7 @@ class TestOcrTrOCR:
 
         return mock_transformers, mock_pil, mock_processor, mock_model
 
+    @requires_torch
     def test_happy_path_grayscale(self):
         import torch
         import autograder.ocr as ocr_mod
@@ -702,6 +714,7 @@ class TestOcrTrOCR:
             with pytest.raises(RuntimeError, match="not installed"):
                 ocr_mod._ocr_trocr(img)
 
+    @requires_torch
     def test_accepts_bgr_image(self):
         """_ocr_trocr must convert BGR to RGB before TrOCR processor."""
         import torch
