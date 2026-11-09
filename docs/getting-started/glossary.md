@@ -1,33 +1,64 @@
 # Glossary
 
-> **Audience:** new developers · **Scope:** the project's vocabulary, with where each term lives in the code ·
-> **Last verified:** 2026-11-09
+> **Audience:** new developers · **Scope:** the words used in GRADE's docs, code and results, in plain language, with where
+> each one lives in the code · **Last verified:** 2026-11-09
 
-Where the code uses a different word from the product, both are listed.
+Terms are grouped by the step where you meet them; the steps are explained in
+[`../architecture/overview.md`](../architecture/overview.md).
 
+## Inputs
 | Term | Meaning | Where |
 |---|---|---|
-| **Exam / `exam_id`** | One exam paper; keys and sheets are grouped by it (e.g. `cie-daa`, `cie-dm`) | `sheets.exam_id`, `answer_keys.exam_id` |
-| **Answer key / marking scheme** | The model answer and max marks for each question. Region *n* is graded against key *n* (by `sort_order`) | `answer_keys` table; parsed by `key_docx.py`, `key_pdf.py` |
-| **Sheet** | One student's uploaded answer script (PDF or image) | `sheets` table; file in `backend/data/uploads/` |
-| **Exam bundle** | Key + sheet uploaded together in one request | `POST /upload/exam-bundle`, `POST /jobs/upload-exam-bundle` |
-| **Strip / raw region** | A horizontal band of one page that holds (part of) an answer | `preprocessing.py` |
-| **Layout / `regions_per_page`** | Answers per PDF page, e.g. `3,1,2`, when the teacher enters it | `EvaluateRequest.regions_per_page` |
-| **Automatic layout** | Each answer's position found from page OCR lines, margin labels and the model answers (flag `layout:auto`) | `answer_layout.py` |
-| **Choice section** | A paper part where only the best *n* answers count ("PART B: any 2 of 3") | `answer_keys.section`, `section_pick`; `totals.py` |
-| **Merge groups** | Which raw strips form one question (Q4 spanning pages 2-3 in `cie-daa`) | `exam_layouts.py` |
-| **Question region** | The merged strips for one question, with page span | `sheets.question_regions` (JSONB column) |
-| **Patch** | The preprocessed image of a region that is sent to OCR | `preprocess_sheet_for_evaluation()` → `pp.patches` |
-| **OCR tier** | One engine in the fallback chain: Google Vision → Azure → PaddleOCR → TrOCR | `ocr.py` (`ocr_patch`) |
-| **Chunk** | A slice of key or sheet text stored with an embedding. Retrieval reads only `rag_chunks`; `answer_key_chunks` is the per-key store that `ingest_keys_rag` copies into it | `rag_chunks`, `answer_key_chunks` |
-| **Corpus / document id** | `keys_{exam_id}` (model answers) and `sheet_{sheet_id}` (one student's OCR) in `rag_chunks.document_id` | `rag/ingest.py` |
-| **Hybrid retrieval** | Vector (pgvector) and full-text candidates fused by reciprocal rank, then re-sorted by cosine similarity and filtered at `GRADE_RAG_SIM_THRESHOLD` | `db.hybrid_search_rag_chunks`, `rag/similarity.py` |
-| **Boundary helpers** | Code that cuts OCR text bleeding in from a neighbouring answer. **Not called by evaluate**; used by `scripts/test_rag_ingestion_retrieval.py` and tests | `rag/boundaries.py` |
-| **Rubric** | The scoring dimensions and JSON output the LLM must follow | `prompts/grading_v2.txt`, `scoring.py` |
-| **Legacy fallback** | Cosine-similarity score used when the LLM is off or fails | `scoring._legacy_fallback_score` |
-| **Grading confidence** | Aggregate of OCR and LLM confidence for a result | `scoring.aggregate_grading_confidence` |
-| **Evaluation result** | The stored grade for one sheet, per question and in total | `evaluation_results` table, `GET /result/{id}` |
-| **HITL patch** | A teacher's manual correction to one question's score | `PATCH /result/{id}/questions/{region_index}` |
-| **Job** | A background upload or evaluate run with stage and progress | `jobs` table, `jobs.py`, `GET /jobs/{id}` |
-| **Deferred ingest** | Job uploads return `sheet_ingest: deferred`; evaluate OCRs the sheet and indexes that OCR into `rag_chunks` | `jobs.py`, `rag/ingest.index_sheet_ocr` |
-| **Preview** | Rendered page PNGs plus `regions.json` overlays for the evaluator UI | `sheet_preview.py`, `backend/data/previews/{sheet_id}/` |
+| **Exam / `exam_id`** | One exam paper. Its key and its students' sheets share the same id (e.g. `cie-dism`) | `answer_keys.exam_id`, `sheets.exam_id` |
+| **Answer key / marking scheme** | The model answer and maximum marks for each question | `answer_keys`; read by `key_docx.py`, `key_pdf.py` |
+| **Structured key** | A PDF key laid out as question number, question text, marks, then `Answer:`. GRADE reads its sub-parts and sections | `key_pdf._parse_answer_anchored_key` |
+| **Choice section** | A part of the paper where only the best *n* answers count ("PART B: answer any 2 of 3") | `answer_keys.section`, `section_pick`; `totals.py` |
+| **Sheet** | One student's scanned answer script (PDF or image) | `sheets`; files in `backend/data/uploads/` |
+| **Exam bundle** | A key and a sheet uploaded together | `POST /jobs/upload-exam-bundle` |
+
+## Finding the answers
+| Term | Meaning | Where |
+|---|---|---|
+| **Layout / `regions_per_page`** | How many answers are on each page, e.g. `3,1,2`, when the teacher types it | `EvaluateRequest.regions_per_page` |
+| **Automatic layout** | GRADE finds each answer itself from the page text, the margin labels and the model answers; results carry the flag `layout:auto` | `answer_layout.py` |
+| **Margin label** | What a student writes in the left margin to start an answer ("1st Ans", "2nd Ans"); used as a hint for where answers begin | `answer_layout.margin_label_spans` |
+| **Preset** | A fixed layout stored per exam; now used only when automatic layout cannot run | `exam_layouts.py` |
+| **Region / question region** | The part of the sheet that holds one answer; it can span pages | `sheets.question_regions` |
+| **Strip** | One page's piece of a region (an answer on two pages has two strips) | `preprocessing.py` |
+| **Preview** | Page images with a box drawn around each region, shown in the portal | `sheet_preview.py`, `backend/data/previews/` |
+
+## Reading and searching
+| Term | Meaning | Where |
+|---|---|---|
+| **OCR** | Turning handwriting into text. Engines are tried in order until one works: Google Vision, Azure, PaddleOCR, TrOCR | `ocr.py` |
+| **OCR confidence** | How sure the OCR engine was (0-1); below 0.6 the result is flagged for review | `QuestionResult.ocr_confidence` |
+| **OCR clean-up** | Fixing obvious OCR mistakes before marking. An optional LLM pass never sees the model answer; a rewrite in the key's words is rejected (`ocr_llm_rejected_key_drift`) | `text_format.py` |
+| **Search index / chunk** | Small pieces of the key and of the student's text, stored with a vector (embedding) so similar text can be found | `rag_chunks` |
+| **Hybrid search** | Finding pieces by meaning (vectors) and by words (full-text search) at once, combining both rankings | `db.hybrid_search_rag_chunks` |
+
+## Marking
+| Term | Meaning | Where |
+|---|---|---|
+| **Pairing by order** | Answer *n* is marked against question *n* | `evaluation_service.run_evaluation` |
+| **KEY SIDE / STUDENT SIDE** | The two halves of what the LLM is shown: the model answer with its key pieces, and the student's answer with its pieces | `rag/retrieval.format_grading_context` |
+| **Rubric** | The four things marked, each 0-4: factual accuracy, conceptual completeness, reasoning, domain terminology | `prompts/grading_v2.txt`, `scoring.py` |
+| **Grader label / `llm_model`** | Which grader produced the marks, e.g. `openrouter:google/gemini-2.5-flash-lite`; `mixed: ...` if it changed mid-sheet | `evaluation_results.llm_model` |
+| **`fallback-legacy`** | Marks from a simple text-similarity score, used when no LLM worked; the feedback says why | `scoring._legacy_fallback_score` |
+| **Grading confidence** | How sure the grader was overall (high / medium / low) | `scoring.aggregate_grading_confidence` |
+
+## Results
+| Term | Meaning | Where |
+|---|---|---|
+| **Evaluation result** | The stored grade for one sheet: every question's marks, feedback and flags, and the total | `evaluation_results`, `GET /result/{id}` |
+| **Counted** | Whether an answer counts towards the total; `false` for the dropped answer in a choice section | `QuestionResult.counted` |
+| **`region_missing`** | No answer region was found for this question, so it got 0 marks; enter the layout and re-grade | `evaluation_service.run_evaluation` |
+| **`review_required`** | The result needs a teacher's look (low confidence, empty OCR, fallback marks...) | result and question flags |
+| **Teacher correction (HITL patch)** | Changing one question's marks or feedback by hand; the total is recalculated. HITL = human in the loop | `PATCH /result/{id}/questions/{n}` |
+| **Job** | A background upload or grading run; the portal polls its progress | `jobs`, `GET /jobs/{id}` |
+
+## Code-only terms
+| Term | Meaning | Where |
+|---|---|---|
+| **Corpus / document id** | The groups inside the search index: `keys_{exam_id}` and `sheet_{sheet_id}` | `rag/ingest.py` |
+| **Patch** | The image of a region handed to OCR | `PreprocessResult.patches` |
+| **Boundary helpers** | Older code that trims text bleeding in from a neighbouring answer; not used when grading | `rag/boundaries.py` |

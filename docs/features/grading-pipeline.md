@@ -4,6 +4,11 @@
 > status, data, failure modes · **Last verified:** 2026-11-09 (`key_pdf.py`, `answer_layout.py`, `evaluation_service.py`,
 > `rag/`, `text_format.py`, `scoring.py`, `totals.py`; end-to-end run on the Disaster Mitigation sample with PaddleOCR and OpenRouter)
 
+## In short
+GRADE reads the key, finds each answer on the sheet, reads it, tidies the text, gathers matching pieces of the model answer,
+asks an LLM to mark it, and adds up the total. The plain-language version of these steps is in
+[`../architecture/overview.md`](../architecture/overview.md); this page gives the code-level detail and what can go wrong.
+
 ## Status
 Works end to end on the bundled CIE samples (`backend/cie/`). Verified on 2026-11-09 with local PaddleOCR (no Google Vision)
 and OpenRouter `google/gemini-2.5-flash-lite`, with **no layout entered**: the reformatted Disaster Mitigation key parsed into
