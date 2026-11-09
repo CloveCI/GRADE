@@ -1,7 +1,7 @@
 # CI/CD and repository security
 
 > **Audience:** anyone merging or maintaining the pipeline · **Scope:** how code gets from a branch to `main` and what
-> stops a bad change on the way · **Last verified:** 2026-11-08 (workflow files validated against the GitHub schema; not yet run on GitHub)
+> stops a bad change on the way · **Last verified:** 2026-11-09 (workflow files validated against the GitHub schema; push and PR runs observed on GitHub)
 
 ## Pipeline at a glance
 
@@ -18,7 +18,7 @@ feature branch ──► PR to staging ──► CI gate + secret scan + PR titl
 | Workflow | Trigger | What it does | Blocks merge? |
 |---|---|---|---|
 | `ci.yml` | PR, push to main/staging | Change detection, repo hygiene, docs check, workflow schema, ruff, backend tests against a pgvector service, frontend lint (report only) and build. Ends in **CI gate**. | Yes: require `CI gate` |
-| `security.yml` | PR, push, weekly | gitleaks over the PR's commits, or the full history on push and schedule | Yes |
+| `security.yml` | PR, push, weekly | gitleaks over the PR's commits, or the full history on push and schedule. One historical false positive (`_anchor_start_for_answer` in `rag/boundaries.py`, commits `3eb533c` and `489d672`) is allow-listed by commit and path in `.github/security/gitleaks.toml` | Yes |
 | `pr-hygiene.yml` | PR | Conventional PR title, path labels | Title |
 | `promotion-guard.yml` | PR into `main` | Fails unless the head branch is `staging` | Yes |
 | `stale.yml` | daily | Closes inactive issues and PRs after 45 + 14 days | No |
@@ -42,7 +42,8 @@ They are not applied yet; see that README for the one-time commands.
 
 - **One required check.** Branch protection requires only `CI gate` (plus the secret scan, PR title and promotion guard);
   jobs skipped by path filters count as passing, so adding a job needs no settings change.
-- **Path filters** keep Actions minutes low: a docs-only PR costs seconds.
+- **Path filters** keep Actions minutes low on pull requests: a docs-only PR costs seconds. Pushes to `main` and `staging`
+  run every job, because after a merge or force-push there is no reliable commit to compare against.
 - **Real Postgres, mocked providers.** The backend suite needs Postgres + pgvector, so CI runs the same image as
   `backend/docker-compose.yml`. No OCR or LLM keys exist in CI; those calls are mocked in the tests.
 - **Explicit schema step.** The API does not create the schema on an empty database
