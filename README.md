@@ -11,9 +11,10 @@ sheet excerpts as extra evidence), so the examiner reviews and corrects grades i
   (Google Vision first; Azure, PaddleOCR, TrOCR as fallbacks).
 - **Score**: rubric grading with Gemini or OpenRouter (cosine-similarity fallback without an LLM); retrieval (pgvector + full-text
   over `rag_chunks`) adds this question's key and sheet excerpts; choice sections count the best answers only.
-- **Review**: a React portal with region previews, per-question score correction, and a PDF report.
+- **Review**: a baseline React portal with region previews, per-question score correction, and a PDF report.
 
-> **Status.** A first-pass grader for teachers to review, not a final marker. Verified end to end on 2026-11-09 on one CIE
+> **Status.** A first-pass grader for teachers to review, not a final marker. The testing below covers the GRADE v2 grading
+> implementation; the portal UI is a baseline and was not part of it. Verified end to end on 2026-11-09 on one CIE
 > sheet (local PaddleOCR + OpenRouter, no layout entered: 6 of 6 answers found, 16.8 / 20), with answer positions checked on two
 > more (17 of 18 boundaries right). Answers are matched to questions **by order**, so skipped or out-of-order answers are
 > mis-graded; accuracy against human examiners is unmeasured; it runs locally with no authentication.

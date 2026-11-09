@@ -3,6 +3,9 @@
 > **Audience:** teachers and developers deciding whether to rely on a GRADE result · **Scope:** the test runs behind the current
 > claims, their results, what was not tested, input requirements and known limits · **Last verified:** 2026-11-09
 
+This testing was created for the **GRADE v2 grading implementation** (key parsing, answer layout, OCR, retrieval, scoring and
+totals in `backend/`). The portal UI is a baseline and was not validated.
+
 **Short answer:** given a CIE-style answer booklet and a marking scheme for the same paper, GRADE finds the answers, reads them
 and produces a sensible grade, but it has been checked in full on **one** sheet. Treat every result as a first-pass grade that
 a teacher reviews, not as a final mark.
@@ -48,7 +51,7 @@ a teacher reviews, not as a final mark.
 
 ## Not tested
 Google Vision, Gemini called directly, Azure, image (non-PDF) sheets, scanned key PDFs, full grading of any sheet other than
-Disaster Mitigation, the portal used by hand (only its API routes), and agreement with a human examiner.
+Disaster Mitigation, the baseline portal UI (only its API routes were exercised), and agreement with a human examiner.
 
 ## It is expected to work when
 - answers are written **in question order**, with a label such as "1st Ans" / "2nd Ans" in the ruled left margin;

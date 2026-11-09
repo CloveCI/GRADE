@@ -4,7 +4,8 @@
 > **Last verified:** 2026-11-09 (`App.jsx`, `vite.config.js`, `src/lib/api.js`, `package.json`)
 
 **Runs as** the Vite dev server on `127.0.0.1:5173`, or as a static build in `dist/` served by any web server. GRADE Companion is
-a React 19 single-page app (React Router 7) with no server-side code.
+a React 19 single-page app (React Router 7) with no server-side code. It is a **baseline** UI: it exercises the v2 grading
+pipeline but was not part of the v2 validation ([`../operations/validation.md`](../operations/validation.md)).
 
 ## What it does
 | Route | Page | Backend it uses |
