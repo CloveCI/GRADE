@@ -199,8 +199,8 @@ def _deskew(image: np.ndarray) -> np.ndarray:
         return image
 
     angles = []
-    for line in lines:
-        x1, y1, x2, y2 = line[0]
+    # OpenCV 4 returns lines as (N, 1, 4), OpenCV 5 as (N, 4); reshape so both work.
+    for x1, y1, x2, y2 in np.asarray(lines).reshape(-1, 4):
         if x2 - x1 != 0:
             angle = np.degrees(np.arctan2(y2 - y1, x2 - x1))
             # We want small corrections (near 0 or ±90 for horizontal/vertical lines)
