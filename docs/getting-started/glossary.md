@@ -1,7 +1,7 @@
 # Glossary
 
 > **Audience:** new developers · **Scope:** the project's vocabulary, with where each term lives in the code ·
-> **Last verified:** 2026-11-08
+> **Last verified:** 2026-11-09
 
 Where the code uses a different word from the product, both are listed.
 
@@ -12,7 +12,9 @@ Where the code uses a different word from the product, both are listed.
 | **Sheet** | One student's uploaded answer script (PDF or image) | `sheets` table; file in `backend/data/uploads/` |
 | **Exam bundle** | Key + sheet uploaded together in one request | `POST /upload/exam-bundle`, `POST /jobs/upload-exam-bundle` |
 | **Strip / raw region** | A horizontal band of one page that holds (part of) an answer | `preprocessing.py` |
-| **Layout / `regions_per_page`** | Comma-separated strips per PDF page, e.g. `3,1,2,1` | `exam_layouts.py`, mirrored in `frontend/src/lib/examLayouts.js` |
+| **Layout / `regions_per_page`** | Answers per PDF page, e.g. `3,1,2`, when the teacher enters it | `EvaluateRequest.regions_per_page` |
+| **Automatic layout** | Each answer's position found from page OCR lines, margin labels and the model answers (flag `layout:auto`) | `answer_layout.py` |
+| **Choice section** | A paper part where only the best *n* answers count ("PART B: any 2 of 3") | `answer_keys.section`, `section_pick`; `totals.py` |
 | **Merge groups** | Which raw strips form one question (Q4 spanning pages 2-3 in `cie-daa`) | `exam_layouts.py` |
 | **Question region** | The merged strips for one question, with page span | `sheets.question_regions` (JSONB column) |
 | **Patch** | The preprocessed image of a region that is sent to OCR | `preprocess_sheet_for_evaluation()` → `pp.patches` |
@@ -27,5 +29,5 @@ Where the code uses a different word from the product, both are listed.
 | **Evaluation result** | The stored grade for one sheet, per question and in total | `evaluation_results` table, `GET /result/{id}` |
 | **HITL patch** | A teacher's manual correction to one question's score | `PATCH /result/{id}/questions/{region_index}` |
 | **Job** | A background upload or evaluate run with stage and progress | `jobs` table, `jobs.py`, `GET /jobs/{id}` |
-| **Deferred ingest** | Job uploads return `sheet_ingest: deferred` and skip indexing. Evaluate OCRs the sheet but does **not** index it into `rag_chunks` | `jobs.py`, `evaluation_service.py` |
+| **Deferred ingest** | Job uploads return `sheet_ingest: deferred`; evaluate OCRs the sheet and indexes that OCR into `rag_chunks` | `jobs.py`, `rag/ingest.index_sheet_ocr` |
 | **Preview** | Rendered page PNGs plus `regions.json` overlays for the evaluator UI | `sheet_preview.py`, `backend/data/previews/{sheet_id}/` |

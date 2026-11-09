@@ -35,8 +35,8 @@ Only a repository admin can bypass them; see [`docs/operations/ci-cd.md`](docs/o
 - No new secret in the diff (gitleaks). Use environment variables; document them in `backend/.env.example` or `frontend/.env.example`.
 - Python: no syntax errors or undefined names (ruff `E9,F63,F7,F82`).
 - Docs: relative links resolve and every page under `docs/` carries a `Last verified` date.
-- Exam layouts: a change to `backend/src/autograder/exam_layouts.py` must be mirrored in `frontend/src/lib/examLayouts.js`
-  (reviewed, not yet automated).
+- Layouts: answer positions are found automatically (`answer_layout.py`); presets in `exam_layouts.py` are only a fallback
+  when automatic layout cannot run. Do not reintroduce presets in the portal.
 - Schema: a change goes into `db.py` (`init_db`) **and** a new timestamped file in `backend/supabase/migrations/`
   ([ADR 0003](docs/architecture/decisions/0003-schema-in-init-db-and-migrations.md)).
 

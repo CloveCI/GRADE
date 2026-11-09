@@ -1,7 +1,7 @@
 # Architecture overview
 
 > **Audience:** new developers · **Scope:** the whole system, how a request travels, where state lives, what is
-> cross-cutting · **Last verified:** 2026-11-08 (checked against `api.py`, `jobs.py`, `evaluation_service.py`, `db.py`)
+> cross-cutting · **Last verified:** 2026-11-09 (checked against `api.py`, `jobs.py`, `evaluation_service.py`, `db.py`)
 
 GRADE is two components and one database. The React portal (`frontend/`) calls the FastAPI service (`backend/`) over HTTP.
 The API keeps everything in PostgreSQL with pgvector, except sheet files and page previews, which it writes to
@@ -28,11 +28,11 @@ flowchart LR
    saves the sheet file. The sheet is **not** OCRed or indexed at this point.
 2. **Evaluate.** `POST /jobs/evaluate` starts `run_evaluation()`. A cached result is returned if the key, layout and prompt
    are unchanged.
-3. **Segment.** `preprocess_sheet_for_evaluation()` renders each page, cuts it into strips using the exam's layout, and
-   merges strips that belong to the same question. The regions are saved on the sheet for the preview.
+3. **Segment.** `preprocess_sheet_for_evaluation()` renders each page and finds one region per question: from the layout the
+   teacher entered, else automatically (`answer_layout.py`). The regions are saved on the sheet for the preview.
 4. **Pair and read.** Question *n* is graded against key *n* (positional, not retrieved). Each question patch goes through the OCR tier chain (`ocr.py`).
-5. **Retrieve.** Hybrid retrieval adds excerpts from `keys_{exam_id}` and, if the sheet was ever indexed, `sheet_{sheet_id}`.
-   Evaluate does not index the sheet itself, so after a portal upload the sheet side is empty.
+5. **Index and retrieve.** The OCR just produced replaces `sheet_{sheet_id}` in `rag_chunks`; hybrid retrieval then adds this
+   question's excerpts from `keys_{exam_id}` and `sheet_{sheet_id}`.
 6. **Score.** `score_answer_llm()` asks Gemini (then OpenRouter) for a rubric JSON, or uses the legacy similarity score.
 7. **Persist and show.** The result goes to `evaluation_results` and `sheet_question_answers`; the portal polls
    `GET /jobs/{id}`, then loads `GET /result/{id}`, the page previews, and `GET /report/{id}/pdf`.
@@ -42,7 +42,7 @@ flowchart LR
 |---|---|---|
 | `sheets` | Sheet metadata, file path, exam, question regions | upload routes, `run_evaluation` |
 | `answer_keys`, `answer_key_chunks` | Model answers, max marks, embedded key chunks | key upload routes |
-| `rag_chunks` | Embedded key and sheet chunks (`keys_{exam_id}`, `sheet_{sheet_id}`) with full-text index; the only table retrieval reads | `ingest_keys_rag` (every key upload), `ingest_sheet_rag` (sync uploads, `/api/sheet/{id}/ingest`) |
+| `rag_chunks` | Embedded key and sheet chunks (`keys_{exam_id}`, `sheet_{sheet_id}`) with full-text index; the only table retrieval reads | `ingest_keys_rag` (every key upload), `index_sheet_ocr` (every evaluate), `ingest_sheet_rag` (sync uploads, `/api/sheet/{id}/ingest`) |
 | `evaluation_results` | Per-sheet grades, rubric breakdown, confidence, prompt hash | `run_evaluation`, HITL patch |
 | `sheet_question_answers` | Per-question OCR text and extracted answers | `run_evaluation` |
 | `jobs` | Background job status, stage, progress, result | `jobs.py` |

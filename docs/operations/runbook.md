@@ -1,7 +1,7 @@
 # Runbook
 
 > **Audience:** whoever runs GRADE for a demo or evaluation · **Scope:** start, check, reset, roll back, incidents ·
-> **Last verified:** 2026-11-08
+> **Last verified:** 2026-11-09
 
 ## Deploy
 Nothing deploys automatically. `main` is the version you demo or hand in. To run it: start the database, the API and the
@@ -29,5 +29,6 @@ PYTHONPATH=src python -c "import autograder.api; from autograder.db import init_
 | Job stuck at a stage | API restarted mid-job (jobs are in-process threads) | Start the job again from the portal |
 | OCR text empty | No OCR engine configured | Set `GOOGLE_APPLICATION_CREDENTIALS`; check `/api/integrations` |
 | Scores from `fallback-legacy` | LLM disabled or both providers failed | Set `GRADE_ENABLE_LLM=true` and a Gemini or OpenRouter key; check the API log |
-| Inspect page / `/api/sheet/{id}/chunks` shows no sheet chunks | Sheet uploaded through the portal (job routes never index it) | `POST /api/sheet/{id}/ingest` |
+| Inspect page / `/api/sheet/{id}/chunks` shows no sheet chunks | The sheet has not been evaluated yet (evaluate indexes it) | Evaluate the sheet, or `POST /api/sheet/{id}/ingest` |
+| Questions graded 0 with `region_missing` | Automatic layout could not run (PaddleOCR missing) and no layout was entered | `pip install -e ".[ocr_paddle]"`, or enter the layout, then re-grade |
 | Evaluator shows no page images | Previews missing for the sheet | Open the sheet preview with `rebuild=true` (`/api/sheet/{id}/preview?rebuild=true`) |

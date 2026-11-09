@@ -1,6 +1,6 @@
 # GRADE: what it is
 
-> **Audience:** everyone · **Scope:** what GRADE does, who it is for, and what is true today · **Last verified:** 2026-11-08
+> **Audience:** everyone · **Scope:** what GRADE does, who it is for, and what is true today · **Last verified:** 2026-11-09
 
 ## In one paragraph
 GRADE (Generalized Recognition and Automated Document Evaluator) grades handwritten exam answer sheets. A teacher uploads a
@@ -12,11 +12,12 @@ project (GRADE v2) by Md Afeeduddin and Syed Liyaqat, tuned for CIE-style intern
 ## What is real today
 | Capability | State | Notes |
 |---|---|---|
-| Answer-key upload (DOCX, JSON, text PDF) | Live | `key_docx.py`, `key_pdf.py`; scanned key PDFs need Google Vision |
+| Answer-key upload (DOCX, JSON, text PDF) | Live | Structured PDF keys (question header + `Answer:`) parsed by header, with PART choice sections; scanned key PDFs need Google Vision |
+| Choice sections ("any 2 of 3") | Live for PDF keys | Best answers counted, paper maximum respected; the DOCX parser does not read PART lines yet |
 | Sheet upload (PDF or image) | Live | Stored under `backend/data/uploads/`. The portal's job routes skip OCR at upload; the sync `/upload/sheet` and `/upload/exam-bundle` routes OCR and index the sheet immediately |
-| Strip segmentation with per-exam layouts | Live | Presets `cie-daa`, `cie-dm` and others in `exam_layouts.py`; spanning answers merge across pages |
+| Answer layout (where each answer is) | Live | Automatic from page OCR lines, margin labels and the model answers (needs PaddleOCR); 17 of 18 boundaries right on three CIE samples. A layout the teacher enters overrides it |
 | Handwriting OCR | Live | Google Vision tier 1; Azure, PaddleOCR, TrOCR as fallbacks when installed and configured |
-| Hybrid retrieval (pgvector + full-text) | Partial | Key excerpts work. Sheet excerpts exist only if the sheet was indexed (sync upload or `POST /api/sheet/{id}/ingest`); the portal's upload path never indexes it. MiniLM embeddings when `sentence-transformers` is installed, hash otherwise |
+| Hybrid retrieval (pgvector + full-text) | Live | Evaluate indexes the OCR it grades; KEY SIDE limited to the graded question. MiniLM embeddings when `sentence-transformers` is installed, hash otherwise |
 | LLM rubric scoring | Live when configured | Gemini, then OpenRouter; with `GRADE_ENABLE_LLM` off it uses a cosine-similarity fallback |
 | Teacher review and score patch (HITL) | Live | `PATCH /result/{id}/questions/{region_index}` from the evaluator page |
 | PDF report | Live | ReportLab, `report_pdf.py` |

@@ -10,8 +10,8 @@ Read `CONTRIBUTING.md` and `docs/getting-started/repo-map.md` first. Short versi
   perf, refactor, test, docs, ci, build, chore, revert.
 - **Tests:** `cd backend && python -m pytest` (needs Postgres from `docker compose up -d`; OCR and LLM calls are mocked);
   `cd frontend && npm run lint && npm run build`. Do not weaken or delete a test to make it pass.
-- **Mirrors:** exam layouts live in both `backend/src/autograder/exam_layouts.py` and `frontend/src/lib/examLayouts.js`; the schema
-  lives in both `db.py` and `backend/supabase/migrations/`. Change both sides together.
+- **Mirrors:** the schema lives in both `db.py` and `backend/supabase/migrations/`; change both together. Answer layout is
+  automatic (`answer_layout.py`); exam presets are a backend fallback only.
 - **Secrets:** never commit keys, tokens, service-account JSON or `.env` files, and never print them in logs, comments or PR text.
   Use environment variables. Nothing prefixed `VITE_` may hold a secret.
 - **Scope:** keep a PR to one idea, and do not reformat unrelated files.
