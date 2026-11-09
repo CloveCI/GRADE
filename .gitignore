@@ -1,26 +1,16 @@
-# Reference modules (local copies; GRADE app code lives under src/autograder/)
-/processing/
-/search/
-/storage/
-/tasks/
-
-# Local / typo folder names (legacy)
-miscillaneousSSS/
-micillaneousSSS/
-
-# Secrets and local env (never commit real keys)
+# ── Env & secrets ────────────────────────────────────────────────────────────
+# Real env files never go in git; only the documented *.example templates do.
 .env
 .env.*
-.env.local
-frontend/.env
-frontend/.env.*
-frontend/.env.local
-
-# Cloud / API key material (paths often used on disk; keep out of git)
+!.env.example
+*.local
 *-service-account*.json
 google-credentials.json
+*.pem
+*.p12
+*.pfx
 
-# Python
+# ── Python ───────────────────────────────────────────────────────────────────
 __pycache__/
 *.py[cod]
 *$py.class
@@ -34,51 +24,72 @@ ENV/
 .ruff_cache/
 *.egg-info/
 .dist/
-
-# Coverage / tooling
+build/
 .coverage
 coverage.xml
 htmlcov/
 .tox/
 
-# Local runtime / uploads (scanned sheets, etc.)
-data/
+# ── Node / Vite (frontend) ───────────────────────────────────────────────────
+node_modules/
+dist/
+dist-ssr/
+*.tsbuildinfo
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
 
-# Generated RAG / OCR outputs (regenerate with scripts/ocr_pdf.py)
-/extraction.json
+# ── Runtime data (uploaded sheets, page previews) ────────────────────────────
+# The API writes these relative to backend/; keep the old root path ignored for existing clones.
+/data/
+/backend/data/
+
+# ── Generated OCR / RAG output (regenerate with backend/scripts/ocr_pdf.py) ──
+extraction.json
 extraction-*.json
 
-# Sample keys / scans (keep out of git unless you intend to share)
-/Key.pdf
-/docs/Key.pdf
+# ── Private sample scans and keys (share deliberately, not by accident) ──────
+Key.pdf
 DocScanner*.pdf
+# Copies dropped at the repo root for testing; the sheet is already tracked as backend/cie/sheets/DISASTER MITIGATION.pdf
+/DISASTER MITIGATION.pdf
+/Disaster_Mitigation_Answer_Key_Reformatted.pdf
 
-# IDE / editor
+# ── Local reference copies and legacy folders (not part of the app) ──────────
+/processing/
+/search/
+/storage/
+/tasks/
+miscillaneousSSS/
+micillaneousSSS/
+frontend-legacy/
+grade-companion-main/
+
+# ── Logs ─────────────────────────────────────────────────────────────────────
+*.log
+logs/
+
+# ── IDE / editor ─────────────────────────────────────────────────────────────
 .idea/
-.vscode/
+.vscode/*
+!.vscode/extensions.json
 *.swp
+*.sw?
 *~
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
 
-# OS
+# ── OS ───────────────────────────────────────────────────────────────────────
 .DS_Store
 Thumbs.db
 ehthumbs.db
 Desktop.ini
 
-# Cursor (local workspace state; optional — remove if you want to share rules)
+# ── Personal AI-tool folders (each developer keeps their own) ────────────────
 .cursor/
-
-# Frontend (Vite)
-frontend-legacy/
-frontend/node_modules/
-frontend/dist/
-
-frontend/*.tsbuildinfo
-frontend/vite.config.js
-frontend/vite.config.d.ts
-
-# Legacy/full app UI copy
-grade-companion-main/
-
-# Project docs
-DESIGN.md
+.claude/
+CLAUDE.md
+claude.md

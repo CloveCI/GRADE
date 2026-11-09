@@ -1,0 +1,8 @@
+# Files allowed above the 1.5 MB hygiene limit (one repo-relative path per line).
+# The CIE sample sheets are real scanned exams used for manual end-to-end grading runs; README and docs reference them.
+backend/cie/sheets/COMPILER DESIGN.pdf
+backend/cie/sheets/CRYPTOGRAPHY AND NETWORK SECURITY.pdf
+backend/cie/sheets/DATA MINING.pdf
+backend/cie/sheets/DESIGN AND ANALYSIS OF ALGORITHM(DAA).pdf
+backend/cie/sheets/DISASTER MITIGATION.pdf
+backend/cie/sheets/MACHINE LEARNING.pdf

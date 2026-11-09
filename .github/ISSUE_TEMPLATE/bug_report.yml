@@ -1,0 +1,40 @@
+name: Bug report
+description: Something is broken or behaves differently from what the docs say
+labels: [bug]
+body:
+  - type: dropdown
+    id: area
+    attributes:
+      label: Where
+      options:
+        - Upload / answer-key parsing
+        - Segmentation / layouts
+        - OCR
+        - Scoring / rubric
+        - Portal (frontend)
+        - Reports (PDF)
+        - Database / setup
+        - CI / tooling
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, what you got. Paste the exact error text.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: How to reproduce
+      placeholder: "1. ...\n2. ...\n3. ..."
+    validations:
+      required: true
+  - type: input
+    id: ids
+    attributes:
+      label: Exam id, sheet id or job id, if you have one
+  - type: markdown
+    attributes:
+      value: "Do not paste API keys, tokens, passwords or real students' answer sheets. If this is a security problem, use the Security tab instead."

@@ -1,0 +1,24 @@
+# gitleaks configuration. Extends the built-in ruleset and only allow-lists things that are provably not secrets.
+title = "GRADE gitleaks config"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "env templates and this config"
+paths = [
+  '''.*\.env\.example$''',
+  '''\.github/security/gitleaks.*''',
+]
+
+# False positive in history from before 2026-11: generic-api-key fires on the call
+# `start = _anchor_start_for_answer(normalized, start, key, ...)` in rag/boundaries.py (no secret).
+# Scoped to the two commits that added the line AND that file, so anything else still fails.
+[[allowlists]]
+description = "generic-api-key false positive: _anchor_start_for_answer call, not a key"
+condition = "AND"
+commits = [
+  "3eb533c359699ac66fdcbff3a376ad53945a4b36",
+  "489d67217515a33cae24863d9de5e7ef22d9d7b8",
+]
+paths = ['''(^|/)src/autograder/rag/boundaries\.py$''']
