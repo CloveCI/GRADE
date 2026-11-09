@@ -119,12 +119,14 @@ def build_ocr_format_prompt(raw: str, key: Dict[str, Any], vocab_hint: str) -> s
     expected = str(key.get("expected_answer") or "").strip()
     prompt_part, _ = expected.split("\n\n", 1) if "\n\n" in expected else (expected, "")
     system = ocr_format_system_prompt()
+    # The model answer itself is deliberately not sent: given it "as vocabulary hints", the clean-up rewrote
+    # student answers in the key's wording (e.g. "rapid urbanization and population growth" became "accelerated
+    # urbanization and demographic expansion"), which then inflated the grade. The term list is enough for spelling.
     return f"""{system}
 
 Question ID: {qid}
 Question stem: {prompt_part[:600]}
-Reference answer (vocabulary hints only — do NOT copy): {expected[:1200]}
-Domain terms: {vocab_hint or "(none)"}
+Domain terms (for spelling only): {vocab_hint or "(none)"}
 
 Raw OCR (return the full corrected answer):
 {raw}

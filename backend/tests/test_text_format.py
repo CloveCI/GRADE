@@ -103,3 +103,59 @@ def test_format_multipart_heuristic_fixes(monkeypatch):
     assert "capacity" in low
     assert "b)" in low or "b )" not in low
     assert len(r.formatted) >= len(raw) * 0.85
+
+
+# --- The OCR clean-up must not move the student's answer towards the model answer ---
+
+import autograder.text_format as tf  # noqa: E402
+
+_URBAN_KEY = {
+    "question_id": "Q6",
+    "expected_answer": (
+        "Write a note on urban hazards.\n\nUrban hazards associate with accelerated urbanization and demographic "
+        "expansion. Common threats include conflagrations, structural collapse and industrial accidents."
+    ),
+}
+_URBAN_OCR = (
+    "Urban hagards are risks associated with cities due to rapid urbanization and population growth. "
+    "Common urban hazards include fires building collapse traffic accidents pollution floods."
+)
+
+
+def _openrouter_only(monkeypatch):
+    monkeypatch.setenv("GRADE_OCR_FORMAT_LLM", "1")
+    monkeypatch.setenv("GRADE_ENABLE_LLM", "1")
+    monkeypatch.delenv("GRADE_GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.setenv("GRADE_OPENROUTER_API_KEY", "test-key")
+
+
+def test_clean_up_prompt_does_not_contain_the_model_answer():
+    from autograder.llm_providers import build_ocr_format_prompt
+
+    prompt = build_ocr_format_prompt(_URBAN_OCR, _URBAN_KEY, "urbanization, hazards")
+    assert "demographic expansion" not in prompt and "conflagrations" not in prompt
+    assert "Write a note on urban hazards." in prompt  # the stem is still there
+    assert "urbanization, hazards" in prompt
+
+
+def test_clean_up_that_rewrites_in_key_wording_is_rejected(monkeypatch):
+    _openrouter_only(monkeypatch)
+    rewrite = (
+        "Urban hazards associate with accelerated urbanization and demographic expansion. Common threats include "
+        "conflagrations, structural collapse, traffic accidents, pollution and floods."
+    )
+    monkeypatch.setattr(tf, "_format_with_openrouter", lambda *a, **k: rewrite)
+    out = tf.format_student_answer(_URBAN_OCR, _URBAN_KEY)
+    assert out.method == "heuristic"
+    assert "ocr_llm_rejected_key_drift" in out.flags
+    assert "demographic" not in out.formatted and "conflagrations" not in out.formatted
+
+
+def test_clean_up_that_only_fixes_spelling_is_kept(monkeypatch):
+    _openrouter_only(monkeypatch)
+    fixed = _URBAN_OCR.replace("hagards", "hazards").replace("fires building", "fires, building")
+    monkeypatch.setattr(tf, "_format_with_openrouter", lambda *a, **k: fixed)
+    out = tf.format_student_answer(_URBAN_OCR, _URBAN_KEY)
+    assert out.method == "llm"
+    assert out.formatted.startswith("Urban hazards are risks associated with cities")

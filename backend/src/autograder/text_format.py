@@ -317,6 +317,28 @@ def _llm_output_acceptable(source: str, llm_out: str) -> bool:
     return False
 
 
+_DRIFT_WORD = re.compile(r"[a-z]{4,}")
+_MAX_KEY_WORDS_INJECTED = 3   # distinct key words the student never wrote; Q6 of the CIE sample had 5
+_MAX_NOVEL_WORD_RATIO = 0.25  # share of output words with no counterpart in the OCR
+
+
+def _llm_drift(source: str, llm_out: str, key: Dict[str, Any]) -> Tuple[float, List[str]]:
+    """
+    How far a clean-up moved away from the OCR: ``(novel_word_ratio, key_words_injected)``.
+
+    A word is novel when neither it nor a close spelling (difflib ratio >= 0.6, which keeps OCR fixes such as
+    "hagard" -> "hazard") occurs in the source. Novel words that occur in the model answer are leakage from the key.
+    """
+    src = sorted(set(_DRIFT_WORD.findall((source or "").lower())))
+    out = _DRIFT_WORD.findall((llm_out or "").lower())
+    if not out:
+        return 0.0, []
+    novel = [w for w in out if w not in src and not difflib.get_close_matches(w, src, n=1, cutoff=0.6)]
+    key_words = set(_DRIFT_WORD.findall(str(key.get("expected_answer") or "").lower()))
+    injected = sorted({w for w in novel if w in key_words})
+    return len(novel) / len(out), injected
+
+
 def format_student_answer(
     raw_ocr: str,
     key: Dict[str, Any],
@@ -397,6 +419,17 @@ def format_student_answer(
         flags.append("ocr_llm_truncated")
         llm_out = None
         method = "heuristic"
+    if llm_out:
+        novel_ratio, injected = _llm_drift(llm_source, llm_out, key)
+        if len(injected) >= _MAX_KEY_WORDS_INJECTED or novel_ratio > _MAX_NOVEL_WORD_RATIO:
+            logger.warning(
+                "OCR format LLM rewrote the answer (novel %.0f%%, key words added %s); using heuristic",
+                novel_ratio * 100,
+                injected,
+            )
+            flags.append("ocr_llm_rejected_key_drift" if injected else "ocr_llm_rejected_drift")
+            llm_out = None
+            method = "heuristic"
 
     if llm_out:
         return FormattedOcrText(
