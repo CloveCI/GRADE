@@ -1,7 +1,7 @@
 # frontend
 
 > **Audience:** developers working in `frontend/` · **Scope:** what the portal does, configuration, run, build ·
-> **Last verified:** 2026-11-08 (`App.jsx`, `vite.config.js`, `src/lib/api.js`, `package.json`)
+> **Last verified:** 2026-11-09 (`App.jsx`, `vite.config.js`, `src/lib/api.js`, `package.json`)
 
 **Runs as** the Vite dev server on `127.0.0.1:5173`, or as a static build in `dist/` served by any web server. GRADE Companion is
 a React 19 single-page app (React Router 7) with no server-side code.
@@ -10,7 +10,7 @@ a React 19 single-page app (React Router 7) with no server-side code.
 | Route | Page | Backend it uses |
 |---|---|---|
 | `/` | Landing | `/api/exams` |
-| `/processing` (`/upload` redirects) | Upload key + sheet, or sheet only; layout auto-filled from exam id | `/jobs/upload-exam-bundle`, `/jobs/upload-sheet` |
+| `/processing` (`/upload` redirects) | Upload key + sheet, or sheet only; optional layout (empty = detected automatically) | `/jobs/upload-exam-bundle`, `/jobs/upload-sheet` |
 | `/evaluator` | Grade a sheet: region preview, per-question OCR text, rubric, score patch | `/jobs/evaluate`, `/result/*`, `/api/sheet/*/preview` |
 | `/exams/:examId` | Keys, sheets and stats for one exam | `/api/exams/*` |
 | `/dashboard` | Metrics and recent sheets | `/api/metrics/overview`, `/api/sheets` |
@@ -28,7 +28,8 @@ only when the API runs elsewhere. Everything prefixed `VITE_` is shipped to the 
 `cd frontend && npm ci && npm run dev` · `npm run lint` · `npm run build`. There are no frontend unit tests yet.
 
 ## Gotchas
-- `src/lib/examLayouts.js` mirrors `backend/src/autograder/exam_layouts.py`; change both in the same PR.
+- The portal sends a layout only when the teacher types one. Do not pre-fill presets: they were wrong for some sheets
+  (`3,1,2,1` was filled in for every 6-question exam).
 - The dev proxy sets a 10-minute timeout for `/evaluate` and `/jobs` because multi-question grading is slow. A production
   reverse proxy needs the same, or use the job routes (they return immediately).
 - Adding an API route that the portal calls in development means adding its prefix to `proxyPaths` in `vite.config.js`.

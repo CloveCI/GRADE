@@ -15,7 +15,7 @@
 - [ ] Schema change: added to `db.py` (`init_db`) **and** a new file in `backend/supabase/migrations/`
 - [ ] New or changed environment variable, documented in `backend/.env.example` / `frontend/.env.example`:
 - [ ] Grading behaviour changed (prompt, rubric, layout, OCR tiers): cached results need `force_regrade`
-- [ ] Exam layout changed in both `exam_layouts.py` and `frontend/src/lib/examLayouts.js`
+- [ ] Segmentation or automatic layout changed: checked on the CIE samples in `backend/cie/`
 
 ## Checklist
 - [ ] No secrets, `.env` files, service-account JSON, build output or large binaries added

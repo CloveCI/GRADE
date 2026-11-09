@@ -7,7 +7,8 @@ with an LLM (with retrieved key and sheet excerpts as extra evidence), so the
 examiner reviews and corrects grades instead of producing them from scratch.
 
 - **Ingest**: answer keys as Word `.docx`, JSON or text PDF; student sheets as PDF or image.
-- **Read**: OpenCV strip segmentation with per-exam layouts, then tiered OCR (Google Vision first; Azure, PaddleOCR, TrOCR as fallbacks).
+- **Read**: finds where each answer starts from the marking scheme and the margin labels (no preset needed), then tiered OCR
+  (Google Vision first; Azure, PaddleOCR, TrOCR as fallbacks).
 - **Score**: rubric grading with Gemini, OpenRouter as fallback, similarity score when the LLM is off; retrieval (pgvector + full-text
   over `rag_chunks`) adds key and sheet excerpts to the prompt.
 - **Review**: a React portal with region previews, per-question score correction, and a PDF report.
@@ -68,7 +69,7 @@ docs/                documentation
 
 | Layer | Technology |
 |---|---|
-| Preprocessing | OpenCV: deskew, ink-aware horizontal strip segmentation, multi-page merge |
+| Preprocessing | OpenCV deskew; automatic answer layout from page OCR lines + margin labels (or a layout the teacher enters) |
 | OCR / HTR | Google Cloud Vision, Azure AI Vision, PaddleOCR, TrOCR |
 | Retrieval | 128-D embeddings (MiniLM via Sentence-Transformers when installed, deterministic hash otherwise), pgvector + Postgres FTS |
 | Scoring | Gemini, OpenRouter fallback, cosine-similarity fallback |
