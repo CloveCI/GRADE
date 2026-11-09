@@ -1,0 +1,30 @@
+name: Feature request
+description: Propose a change or addition
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What can you not do today, or what is painful? Describe the problem before the solution.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed change
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+  - type: dropdown
+    id: cost
+    attributes:
+      label: Does it spend money or provider credits?
+      options:
+        - "No"
+        - Google Vision / Azure OCR calls
+        - Gemini / OpenRouter LLM calls
+        - Not sure

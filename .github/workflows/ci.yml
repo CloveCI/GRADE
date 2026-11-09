@@ -1,0 +1,188 @@
+name: CI
+
+# One workflow, one required check. `ci-gate` at the bottom is the single job to require in branch protection: it passes only
+# when every job relevant to the change passed (jobs skipped by path filters count as fine). Adding a job needs no settings change.
+# Third-party actions are pinned to a commit SHA with the version in a comment (Dependabot keeps them current).
+
+on:
+  push:
+    branches: [main, staging]
+  pull_request:
+  workflow_dispatch:
+
+# A newer push to the same PR cancels the older run; main always runs to completion.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+env:
+  PYTHON_VERSION: "3.12"
+  NODE_VERSION: "22"
+
+jobs:
+  # ---------------------------------------------------------------------------------------------- what changed
+  changes:
+    name: Detect changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      backend: ${{ steps.filter.outputs.backend }}
+      frontend: ${{ steps.filter.outputs.frontend }}
+      python: ${{ steps.filter.outputs.python }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dorny/paths-filter@0e4a8c6effa4802afeda77dc8d303f8176d7dfad # v3
+        id: filter
+        with:
+          filters: |
+            backend:
+              - "backend/**"
+              - ".github/workflows/ci.yml"
+            frontend:
+              - "frontend/**"
+              - ".github/workflows/ci.yml"
+            python:
+              - "**/*.py"
+              - "ruff.toml"
+
+  # ---------------------------------------------------------------------------------------------- always-on repo checks
+  repo-checks:
+    name: Repo hygiene and docs
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: No generated output, real env files or oversized files tracked
+        run: python scripts/ci/check_repo_hygiene.py
+      - name: Docs - relative links, anchors and 'Last verified' lines
+        run: python scripts/ci/check_docs.py
+      - name: Workflow files are valid
+        run: |
+          pip install --quiet "check-jsonschema==0.29.4"
+          check-jsonschema --builtin-schema vendor.github-workflows .github/workflows/*.yml
+
+  lint-python:
+    name: Lint (ruff)
+    needs: changes
+    if: needs.changes.outputs.python == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Syntax errors and undefined names (rules in ruff.toml)
+        run: |
+          pip install --quiet "ruff==0.8.4"
+          ruff check --output-format=github .
+
+  # ---------------------------------------------------------------------------------------------- components
+  backend:
+    name: Backend tests
+    needs: changes
+    if: needs.changes.outputs.backend == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    # The suite talks to a real Postgres + pgvector (same image as backend/docker-compose.yml, same host port 5433, so
+    # tests/conftest.py's default URL works unchanged). OCR engines and LLM providers are mocked; no provider keys are set.
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: grade
+          POSTGRES_PASSWORD: grade
+          POSTGRES_DB: grade_test
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U grade -d grade_test"
+          --health-interval 3s
+          --health-timeout 5s
+          --health-retries 20
+    defaults:
+      run:
+        working-directory: backend
+    env:
+      PYTHONPATH: src
+      GRADE_DATABASE_URL: postgresql://grade:grade@127.0.0.1:5433/grade_test
+      GRADE_TEST_DATABASE_URL: postgresql://grade:grade@127.0.0.1:5433/grade_test
+      GRADE_EMBED_BACKEND: hash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: backend/pyproject.toml
+      # opencv-python (not -headless) loads libGL/libglib at import time; slim runner images may lack them.
+      - name: System libraries for OpenCV
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libgl1 libglib2.0-0
+      - name: Install
+        run: pip install -e ".[api,dev]"
+      # The API only re-applies the schema at startup when the core tables already exist (ADR 0003), so create it explicitly.
+      - name: Create the schema
+        run: python -c "from autograder.db import init_db; init_db()"
+      - name: Run tests
+        run: python -m pytest -q -p no:cacheprovider
+
+  frontend:
+    name: Frontend (lint, build)
+    needs: changes
+    if: needs.changes.outputs.frontend == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci --no-audit --no-fund
+      # Report only for now: the existing code has 9 eslint errors (mostly react-hooks/set-state-in-effect in
+      # EvaluatorPage.jsx). Remove continue-on-error in the PR that clears them, so lint then blocks like the build does.
+      - name: Lint (report only)
+        continue-on-error: true
+        run: npm run lint
+      - name: Build
+        run: npm run build
+
+  # ---------------------------------------------------------------------------------------------- the one required check
+  ci-gate:
+    name: CI gate
+    if: always()
+    needs: [changes, repo-checks, lint-python, backend, frontend]
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: scripts/ci
+          persist-credentials: false
+      - name: Every relevant job passed
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: python3 scripts/ci/ci_gate.py

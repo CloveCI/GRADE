@@ -1,0 +1,25 @@
+#!/bin/sh
+# Fast local guard; CI runs the same checks. Skipped silently when a tool is not installed.
+set -e
+
+# Never commit generated output, real env files or big binaries.
+if command -v python3 >/dev/null 2>&1; then PY=python3; elif command -v python >/dev/null 2>&1; then PY=python; else PY=""; fi
+if [ -n "$PY" ]; then
+  $PY scripts/ci/check_repo_hygiene.py >/dev/null || { echo "pre-commit: repo hygiene check failed (run: $PY scripts/ci/check_repo_hygiene.py)"; exit 1; }
+  # Only when docs or markdown are staged: broken links and missing 'Last verified' lines.
+  if git diff --cached --name-only --diff-filter=ACMR | grep -q '\.md$'; then
+    $PY scripts/ci/check_docs.py >/dev/null || { echo "pre-commit: docs check failed (run: $PY scripts/ci/check_docs.py)"; exit 1; }
+  fi
+fi
+
+# Secrets in the staged changes.
+if command -v gitleaks >/dev/null 2>&1; then
+  gitleaks protect --staged --config .github/security/gitleaks.toml --no-banner || { echo "pre-commit: gitleaks found a secret in the staged changes"; exit 1; }
+fi
+
+# Syntax errors / undefined names in staged Python.
+if command -v ruff >/dev/null 2>&1; then
+  files=$(git diff --cached --name-only --diff-filter=ACM | grep '\.py$' || true)
+  # Rules come from ruff.toml, the same file CI uses.
+  [ -z "$files" ] || ruff check $files || exit 1
+fi
