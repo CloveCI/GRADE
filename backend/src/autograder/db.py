@@ -25,7 +25,12 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Json
 
 try:
-    from pgvector.psycopg import Vector, register_vector
+    from pgvector.psycopg import register_vector
+
+    try:
+        from pgvector import Vector  # pgvector >= 0.4 (0.5 no longer re-exports it from pgvector.psycopg)
+    except ImportError:
+        from pgvector.psycopg import Vector  # pgvector 0.3.x
 except ImportError:  # pragma: no cover - optional deps
     Vector = None  # type: ignore[misc, assignment]
     register_vector = None  # type: ignore[misc, assignment]
@@ -198,6 +203,17 @@ def _register_pgvector(conn) -> None:
         info = _type_info(typname)
         if info is not None:
             reg_fn(conn, info)
+
+
+def _embedding_to_list(emb: Any) -> List[float]:
+    """Plain floats from a stored embedding: pgvector >= 0.5 returns ``Vector`` objects, older versions numpy arrays."""
+    if emb is None:
+        return []
+    if hasattr(emb, "to_list"):
+        emb = emb.to_list()
+    elif hasattr(emb, "tolist"):
+        emb = emb.tolist()
+    return [float(x) for x in emb]
 
 
 def _require_vector_deps() -> None:
@@ -794,7 +810,7 @@ def _attach_answer_chunks(keys: List[Dict[str, Any]]) -> None:
             for row in cur.fetchall():
                 item = dict(row)
                 emb = item.pop("embedding", None)
-                item["embedding"] = [float(x) for x in emb] if emb is not None else []
+                item["embedding"] = _embedding_to_list(emb)
                 kid = str(item.pop("answer_key_id"))
                 by_key.setdefault(kid, []).append(item)
     for k in keys:
@@ -900,7 +916,7 @@ def list_answer_keys(exam_id: str) -> List[Dict[str, Any]]:
         if emb is None:
             item["embedding"] = []
         else:
-            item["embedding"] = [float(x) for x in emb]
+            item["embedding"] = _embedding_to_list(emb)
         ro = item.get("rubric_override")
         if isinstance(ro, str):
             item["rubric_override"] = json.loads(ro) if ro else None
