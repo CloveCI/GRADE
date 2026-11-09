@@ -31,15 +31,16 @@ jobs:
     permissions:
       contents: read
       pull-requests: read
+    # Pull requests are filtered by path (paths-filter asks the GitHub API, no git needed). Pushes to main/staging run
+    # every job: there is nothing reliable to diff against after a merge or force-push, and paths-filter would need git
+    # credentials to fetch the old commit in this private repo.
     outputs:
-      backend: ${{ steps.filter.outputs.backend }}
-      frontend: ${{ steps.filter.outputs.frontend }}
-      python: ${{ steps.filter.outputs.python }}
+      backend: ${{ github.event_name == 'pull_request' && steps.filter.outputs.backend || 'true' }}
+      frontend: ${{ github.event_name == 'pull_request' && steps.filter.outputs.frontend || 'true' }}
+      python: ${{ github.event_name == 'pull_request' && steps.filter.outputs.python || 'true' }}
     steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
       - uses: dorny/paths-filter@0e4a8c6effa4802afeda77dc8d303f8176d7dfad # v3
+        if: github.event_name == 'pull_request'
         id: filter
         with:
           filters: |
