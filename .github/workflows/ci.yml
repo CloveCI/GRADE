@@ -132,6 +132,9 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
           cache-dependency-path: backend/pyproject.toml
+      # opencv-python (not -headless) loads libGL/libglib at import time; slim runner images may lack them.
+      - name: System libraries for OpenCV
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libgl1 libglib2.0-0
       - name: Install
         run: pip install -e ".[api,dev]"
       # The API only re-applies the schema at startup when the core tables already exist (ADR 0003), so create it explicitly.
