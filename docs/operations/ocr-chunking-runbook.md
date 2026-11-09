@@ -1,264 +1,62 @@
-# Whole-PDF OCR and chunking runbook
+# OCR a whole PDF and store its chunks
 
-> **Audience:** developers inspecting OCR quality or loading chunks by hand · **Scope:** `backend/scripts/show_grade_workflow.py`
-> and `run_ocr_chunk_store.ps1` · **Last verified:** 2026-11-08 (script paths and options checked; not re-run with live OCR)
+> **Audience:** developers checking OCR quality or loading chunks by hand · **Scope:** `backend/scripts/show_grade_workflow.py`
+> and `run_ocr_chunk_store.ps1` · **Last verified:** 2026-11-09 (script options checked against the code; not re-run with live OCR)
 
-This guide explains how to run the GRADE workflow script that renders a PDF, OCRs every page, records OCR confidence, and builds document-level chunks.
+This is a **diagnostic tool**, separate from grading. It renders a PDF, OCRs every page, shows the OCR confidence, splits the
+text into chunks and can store them in `public.rag_chunks`. The chunks are stored under the script's own document id, not
+`sheet_{sheet_id}`, so grading never reads them.
 
-## Script
-
-```powershell
-scripts\show_grade_workflow.py
-```
-
-The script processes the whole PDF by default. Use `--page N` only when you want to inspect one page.
-
-## One-Time Setup
-
-From `backend/` (every command below runs there):
-
+## Before you start
+From `backend/`:
 ```powershell
 $env:PYTHONPATH = "src"
+python -m pip install -e ".[api,ocr_paddle]"     # or ocr_google for Google Vision
 ```
-
-Install project dependencies if needed:
-
-```powershell
-python -m pip install -e ".[api,ocr_google]"
-```
-
-This workspace also supports local script dependencies in:
-
-```text
-backend\.dist\python
-```
-
-The workflow script automatically loads `backend\.dist\python` when it exists.
-
-The examples below use `DocScanner 3 Apr 2026 12-56*.pdf`, a private scan that is gitignored and not in the repository.
-Substitute any sheet you have, e.g. `"cie\sheets\DATA MINING.pdf"`. `run_ocr_chunk_store.ps1` defaults to the same
-DocScanner name, so pass `-Pdf` explicitly.
-
-## Demo Run Without OCR Credentials
-
-Use mock OCR to verify PDF rendering, preprocessing, confidence display, and chunking without Google Vision, Azure, PaddleOCR, or TrOCR:
-
-```powershell
-python scripts\show_grade_workflow.py "DocScanner 3 Apr 2026 12-56*.pdf" --mock-ocr --full-page
-```
-
-Write the complete chunked JSON payload:
-
-```powershell
-python scripts\show_grade_workflow.py "DocScanner 3 Apr 2026 12-56*.pdf" --mock-ocr --full-page -o extraction.json
-```
-
-## Real OCR Run
-
-Configure at least one OCR engine first. For Google Vision, set one of:
-
-```powershell
-$env:GOOGLE_APPLICATION_CREDENTIALS = "C:\path\to\service-account.json"
-```
-
-or:
-
-```powershell
-$env:GOOGLE_CLOUD_VISION_API_KEY = "your-api-key"
-```
-
-Then run:
-
-```powershell
-python scripts\show_grade_workflow.py "DocScanner 3 Apr 2026 12-56*.pdf" --full-page -o extraction.json
-```
-
-If `GRADE_DATABASE_URL` is set in `.env`, the script also embeds the generated chunks and upserts them into the table below.
-They are stored under the script's own document id, not `sheet_{sheet_id}`, so the grading pipeline never reads them:
-
-```text
-public.rag_chunks
-```
-
-Remove `--full-page` if you want contour-based answer-region segmentation instead of one OCR region per page:
-
-```powershell
-python scripts\show_grade_workflow.py "DocScanner 3 Apr 2026 12-56*.pdf" -o extraction.json
-```
-
-## Exact One-Command Runner
-
-Use this PowerShell script to run the full procedure: load `.env`, OCR the whole PDF, chunk it, write `extraction.json`, store chunks in `public.rag_chunks`, and run a sample retrieval query.
-
-```powershell
-.\scripts\run_ocr_chunk_store.ps1
-```
-
-Equivalent expanded command:
-
-```powershell
-$env:PYTHONPATH = "src"
-python scripts\show_grade_workflow.py "DocScanner 3 Apr 2026 12-56*.pdf" -o extraction.json --query "algorithm steps" --top-k 3
-```
-
-Options:
-
-```powershell
-.\scripts\run_ocr_chunk_store.ps1 -FullPage
-```
-
-OCR each page as one full-page region.
-
-```powershell
-.\scripts\run_ocr_chunk_store.ps1 -Pdf "path\to\sheet.pdf" -Output "my_extraction.json" -Query "stack operations" -TopK 5
-```
-
-Run a different PDF and retrieval query.
-
-```powershell
-.\scripts\run_ocr_chunk_store.ps1 -NoQuery
-```
-
-Store chunks without running the retrieval test.
-
-## Useful Options
-
-```powershell
---page 2
-```
-
-Only process page 2.
-
-```powershell
---full-page
-```
-
-OCR each PDF page as one region. This is often best for scanned notes or pages where contour segmentation clips sentences.
-
-```powershell
---expected-regions 5
-```
-
-Tell segmentation how many answer regions to expect. If contour detection finds a different count, GRADE uses grid fallback.
-
-```powershell
---chunk-size 512 --chunk-overlap 96
-```
-
-Control RAG chunk length and overlap.
-
-```powershell
---save-patches files\patches
-```
-
-Save preprocessed page or region images for inspection.
-
-```powershell
---consensus
-```
-
-Use OCR consensus mode instead of the normal single tier-chain result.
-
-```powershell
---no-db
-```
-
-Skip Postgres storage even when `GRADE_DATABASE_URL` is set.
-
-```powershell
---query "algorithm steps" --top-k 3
-```
-
-After storing chunks, run a similarity search against the chunks for this PDF.
-
-## Output
-
-The terminal shows:
-
-- page count and selected pages
-- preprocessing diagnostics per page
-- OCR engine, confidence, flags, and text preview per region
-- chunk IDs, source page, source region, OCR confidence, and chunk preview
-- review signal when any OCR confidence is below `0.60`
-- database upsert count when `GRADE_DATABASE_URL` is configured
-
-The JSON output contains:
-
-- `document_id`
-- `source`
-- `preprocess.pages`
-- `regions`
-- `chunks`
-- `chunking`
-- `full_text`
-
-Each chunk keeps metadata for:
-
-- `source_page`
-- `region_id`
-- `ocr_engine`
-- `ocr_confidence`
-- `source_file`
-- `source_path`
-
-## Verification
-
-Check that the script compiles:
-
-```powershell
-python -m py_compile scripts\show_grade_workflow.py
-```
-
-Check the workflow without live OCR:
-
-```powershell
-python scripts\show_grade_workflow.py "DocScanner 3 Apr 2026 12-56*.pdf" --mock-ocr --full-page --chunk-size 120 --chunk-overlap 20
-```
-
-Expected behavior for a multi-page sample sheet:
-
-- all pages are processed
-- one region per page with `--full-page`
-- chunks are created across the whole document
-- low OCR confidence regions are listed for manual review
-
-## Common Issues
-
-`ModuleNotFoundError: No module named 'cv2'`
-
-Install OpenCV:
-
-```powershell
-python -m pip install opencv-python
-```
-
-`PyMuPDF is required for PDF page counting`
-
-Install PyMuPDF:
-
-```powershell
-python -m pip install pymupdf
-```
-
-OCR returns empty text or `all_tiers_failed`
-
-Configure Google Vision or Azure credentials, or install local OCR extras:
-
-```powershell
-python -m pip install -e ".[ocr_google]"
-python -m pip install -e ".[ocr_azure]"
-python -m pip install -e ".[ocr_paddle]"
-python -m pip install -e ".[ocr_trocr]"
-```
-
-`Install PostgreSQL dependencies: pip install 'psycopg[binary]' pgvector`
-
-Install database dependencies:
-
-```powershell
-python -m pip install "psycopg[binary]" pgvector
-```
-
-Database connection fails
-
-Check that `.env` contains `GRADE_DATABASE_URL`. For Supabase pooler URLs, ensure your network allows outbound database connections.
+Use any sheet you have, for example `"cie\sheets\DATA MINING.pdf"`. Local packages in `backend\.dist\python` are loaded
+automatically if that folder exists.
+
+## Common runs
+| I want to... | Command |
+|---|---|
+| Check the pipeline without any OCR engine (fake OCR) | `python scripts\show_grade_workflow.py "cie\sheets\DATA MINING.pdf" --mock-ocr --full-page` |
+| OCR every page and save the result as JSON | `python scripts\show_grade_workflow.py "cie\sheets\DATA MINING.pdf" --full-page -o extraction.json` |
+| Also store the chunks and try a search | `python scripts\show_grade_workflow.py "cie\sheets\DATA MINING.pdf" -o extraction.json --query "apriori algorithm" --top-k 3` |
+| Do all of that in one PowerShell command | `.\scripts\run_ocr_chunk_store.ps1 -Pdf "cie\sheets\DATA MINING.pdf"` |
+
+Chunks are stored only when `GRADE_DATABASE_URL` is set in `backend/.env` (add `--no-db` to skip). For OCR, set
+`GOOGLE_APPLICATION_CREDENTIALS` or `GOOGLE_CLOUD_VISION_API_KEY` for Vision, or install PaddleOCR.
+
+## Options
+| Option | Effect |
+|---|---|
+| `--page N` | only page *N* (default: every page) |
+| `--full-page` | one region per page; often best for notes, where splitting can cut sentences |
+| `--expected-regions N` | expect *N* answer regions (falls back to an even grid if detection finds a different number) |
+| `--chunk-size 512 --chunk-overlap 96` | chunk length and overlap, in characters |
+| `--save-patches DIR` | save the page or region images that were sent to OCR |
+| `--consensus` | run cloud OCR and PaddleOCR and keep the more confident result (TrOCR if both fail) |
+| `--mock-ocr` | fake OCR text, to test rendering and chunking without an engine |
+| `--no-db` | do not store chunks even if a database is configured |
+| `--query TEXT --top-k K` | after storing, search the stored chunks |
+| `-o FILE` | write the full result as JSON |
+
+`run_ocr_chunk_store.ps1` takes `-Pdf`, `-Output`, `-Query`, `-TopK`, `-FullPage` and `-NoQuery`. Always pass `-Pdf`: its
+default file name points at a private scan that is not in the repository.
+
+## What you get
+- **On screen:** pages processed, each region's OCR engine, confidence and a text preview, the chunks created, a warning for
+  any region below 0.60 confidence, and how many chunks were stored.
+- **In the JSON:** `document_id`, `source`, `preprocess.pages`, `regions`, `chunks` (each with page, region, OCR engine and
+  confidence, source file) and `full_text`.
+
+## Common problems
+| Message | Fix |
+|---|---|
+| `No module named 'cv2'` | `python -m pip install opencv-python` |
+| `PyMuPDF is required for PDF page counting` | `python -m pip install pymupdf` |
+| Empty text or `all_tiers_failed` | configure Google Vision, or install an OCR extra: `-e ".[ocr_paddle]"` (also `ocr_google`, `ocr_azure`, `ocr_trocr`) |
+| `Install PostgreSQL dependencies` | `python -m pip install "psycopg[binary]" pgvector` |
+| Database connection fails | check `GRADE_DATABASE_URL` in `backend/.env`; Supabase pooler URLs need outbound access to port 6543 |
+
+Next: [`runbook.md`](runbook.md) · [`validation.md`](validation.md)

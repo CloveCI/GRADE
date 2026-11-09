@@ -26,19 +26,20 @@ backend/
   src/autograder/
     api.py               FastAPI app: every HTTP route, startup (lifespan), CORS
     jobs.py              background threads for upload and evaluate jobs (polled via GET /jobs/{id})
-    evaluation_service.py  the evaluate pipeline: segment, OCR, retrieve, score, persist
+    evaluation_service.py  grading a sheet: find answers, OCR, index, clean up, retrieve, score, total, save
     preprocessing.py     OpenCV: PDF render, deskew, per-question regions (entered layout or automatic)
     answer_layout.py     automatic layout: page OCR lines + margin labels + model answers -> one region per question
     totals.py            totals with choice sections (best n of m)
     exam_layouts.py      layout parsing; per-exam presets, used only when automatic layout cannot run
     ocr.py               tiered OCR: Google Vision, Azure, PaddleOCR, TrOCR
+    text_format.py       OCR clean-up before marking (heuristics + guarded LLM pass)
     scoring.py           rubric scoring: mock, Gemini, OpenRouter, legacy cosine fallback
     llm_providers.py     provider keys, model names, prompt builders
     prompts/             grading_v2.txt, ocr_format_v1.txt
     rag/                 ingest (rag_chunks), retrieval (pgvector + FTS), similarity; boundaries.py (scripts/tests only)
     embeddings.py        128-D vectors: MiniLM projected from 384-D when sentence-transformers is installed, hash otherwise
     db.py                Postgres access and the idempotent schema (init_db)
-    key_docx.py, key_pdf.py, key_chunks.py   answer-key parsing and chunking
+    key_docx.py, key_pdf.py, key_chunks.py   answer-key parsing (incl. structured PDFs and sections) and chunking
     report_pdf.py        ReportLab PDF report
     sheet_preview.py     page PNGs and regions.json for the evaluator UI
     schemas.py           Pydantic request/response models
