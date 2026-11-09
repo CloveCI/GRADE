@@ -21,6 +21,7 @@ project (GRADE v2) by Md Afeeduddin and Syed Liyaqat, tuned for CIE-style intern
 | Hybrid retrieval (pgvector + full-text) | Live | Evaluate indexes the OCR it grades; KEY SIDE limited to the graded question. MiniLM embeddings when `sentence-transformers` is installed, hash otherwise |
 | LLM rubric scoring | Live when configured | Gemini, then OpenRouter (validated with `google/gemini-2.5-flash-lite`); with `GRADE_ENABLE_LLM` off, or every provider failing, a cosine-similarity fallback labelled `fallback-legacy` |
 | OCR clean-up before grading | Live | Heuristics plus an optional LLM pass that never sees the model answer; rewrites towards the key are rejected |
+| Portal UI (GRADE Companion) | Baseline | Working pages for upload, grading, review and reports; not covered by the v2 validation |
 | Teacher review and score patch (HITL) | Live | `PATCH /result/{id}/questions/{region_index}` from the evaluator page |
 | PDF report | Live | ReportLab, `report_pdf.py` |
 | Hosted deployment | Not built | Runs on a developer machine; nothing deploys automatically |
