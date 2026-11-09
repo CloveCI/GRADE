@@ -20,6 +20,9 @@ class AnswerKeyItemIn(BaseModel):
     max_marks: float = Field(gt=0)
     domain: str = "general"
     rubric_override: Optional[dict] = None
+    # Exam section (e.g. "B") and how many of its questions count ("answer any 2 of 3"); None = every question counts.
+    section: Optional[str] = None
+    section_pick: Optional[int] = Field(default=None, gt=0)
 
 
 class AnswerKeyOut(BaseModel):
@@ -32,6 +35,8 @@ class AnswerKeyOut(BaseModel):
     domain: str = "general"
     rubric_override: Optional[dict] = None
     sort_order: int = 0
+    section: Optional[str] = None
+    section_pick: Optional[int] = None
     answer_chunks: List[AnswerKeyChunkOut] = Field(default_factory=list)
 
 
@@ -123,6 +128,9 @@ class QuestionResult(BaseModel):
     grading_confidence: str
     ocr_confidence: float
     flags: List[str] = Field(default_factory=list)
+    section: Optional[str] = None
+    section_pick: Optional[int] = None
+    counted: bool = True  # False when a choice section ("best 2 of 3") drops this answer from the total
 
 
 class EvaluateResponse(BaseModel):

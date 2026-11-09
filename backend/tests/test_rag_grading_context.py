@@ -129,3 +129,60 @@ def test_retrieve_context_for_grading_monkeypatch(monkeypatch):
     assert ctx["key_hit_count"] >= 1
     assert ctx["sheet_hit_count"] >= 1
     assert "keys_exam-1" in ctx["document_ids"][0] or "keys_" in str(ctx["document_ids"])
+
+
+def test_key_side_keeps_only_the_graded_question(monkeypatch):
+    """Other questions' model answers must not appear under 'Question N' (seen on all 6 Disaster Mitigation questions)."""
+
+    def fake_keys(exam_id, query, *, top_k=5):
+        return [
+            {"chunk_id": "key_q2a", "text_content": "Q2 hazard vs disaster", "similarity": 0.8, "meta": {"kind": "answer_key", "question_id": "Q2"}},
+            {"chunk_id": "key_q1a", "text_content": "Q1 classification", "similarity": 0.7, "meta": {"kind": "answer_key", "question_id": "Q1"}},
+            {"chunk_id": "key_q4a", "text_content": "Q4 risk relationship", "similarity": 0.6, "meta": {"kind": "answer_key", "question_id": "Q4"}},
+        ]
+
+    monkeypatch.setattr("autograder.rag.retrieval.hybrid_search_for_keys", fake_keys)
+    monkeypatch.setattr("autograder.rag.retrieval.list_rag_chunks_for_corpus", lambda *a, **k: [])
+    monkeypatch.setattr("autograder.rag.retrieval.hybrid_search_rag_chunks", lambda *a, **k: [])
+    ctx = retrieve_context_for_grading("s1", "exam1", "a hazard is", {"id": "k2", "question_id": "Q2", "expected_answer": "x"})
+    assert [h["chunk_id"] for h in ctx["key_hits"]] == ["key_q2a"]
+    assert "Q1 classification" not in ctx["context_text"]
+    assert "Q4 risk relationship" not in ctx["context_text"]
+
+
+def test_key_side_falls_back_to_the_questions_own_chunks(monkeypatch):
+    calls = {}
+
+    def fake_list(document_id, **kwargs):
+        calls["doc"], calls["qid"] = document_id, kwargs.get("question_id")
+        return [{"chunk_id": "key_q5", "text_content": "Q5 model", "meta": {"kind": "answer_key", "question_id": "Q5"}}] if document_id.startswith("keys_") else []
+
+    monkeypatch.setattr(
+        "autograder.rag.retrieval.hybrid_search_for_keys",
+        lambda *a, **k: [{"chunk_id": "key_q1", "text_content": "Q1", "meta": {"kind": "answer_key", "question_id": "Q1"}}],
+    )
+    monkeypatch.setattr("autograder.rag.retrieval.list_rag_chunks_for_corpus", fake_list)
+    monkeypatch.setattr("autograder.rag.retrieval.hybrid_search_rag_chunks", lambda *a, **k: [])
+    ctx = retrieve_context_for_grading("s1", "exam1", "floods", {"id": "k5", "question_id": "Q5", "expected_answer": "x"})
+    assert [h["chunk_id"] for h in ctx["key_hits"]] == ["key_q5"]
+
+
+def test_fts_match_survives_similarity_cutoff():
+    from autograder.rag.similarity import filter_hits_by_threshold
+
+    hits = [
+        {"chunk_id": "noisy_ocr_bhopal", "similarity": 0.32, "fts_match": True},
+        {"chunk_id": "unrelated", "similarity": 0.20},
+        {"chunk_id": "strong", "similarity": 0.60},
+    ]
+    kept = [h["chunk_id"] for h in filter_hits_by_threshold(hits, threshold=0.35)]
+    assert kept == ["noisy_ocr_bhopal", "strong"]
+
+
+def test_fts_query_is_ored_and_sanitised():
+    from autograder.db import _fts_or_query
+
+    assert _fts_or_query("Question Q4 model answer reference: Risk = Hazard & Vulnerability!") == (
+        "question | q4 | model | answer | reference | risk | hazard | vulnerability"
+    )
+    assert _fts_or_query("') | !! & :*") == ""

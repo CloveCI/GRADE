@@ -401,6 +401,8 @@ CREATE TABLE IF NOT EXISTS public.answer_keys (
 )
 """.strip(),
     "COMMENT ON TABLE public.answer_keys IS 'Model answers; sort_order preserves upload / sheet row order'",
+    "ALTER TABLE public.answer_keys ADD COLUMN IF NOT EXISTS section TEXT",
+    "ALTER TABLE public.answer_keys ADD COLUMN IF NOT EXISTS section_pick INTEGER",
     "COMMENT ON COLUMN public.answer_keys.embedding IS '128-D document vector; granular chunks in answer_key_chunks'",
     """
 CREATE INDEX IF NOT EXISTS idx_answer_keys_exam_sort
@@ -810,6 +812,8 @@ def insert_answer_key(
     sort_order: int = 0,
     *,
     answer_chunks: Optional[List[Dict[str, Any]]] = None,
+    section: Optional[str] = None,
+    section_pick: Optional[int] = None,
 ) -> str:
     from autograder.key_chunks import aggregate_key_embedding, build_answer_key_chunks
     from autograder.embeddings import embed_text
@@ -841,8 +845,8 @@ def insert_answer_key(
                 """
                 INSERT INTO public.answer_keys(
                     id, exam_id, question_id, expected_answer, embedding, max_marks,
-                    domain, rubric_override, sort_order
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    domain, rubric_override, sort_order, section, section_pick
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     key_id,
@@ -854,6 +858,8 @@ def insert_answer_key(
                     domain,
                     rub,
                     sort_order,
+                    section,
+                    section_pick,
                 ),
             )
     upsert_answer_key_chunks(key_id, chunks)
@@ -878,7 +884,7 @@ def list_answer_keys(exam_id: str) -> List[Dict[str, Any]]:
             _pg_execute(cur,
                 """
                 SELECT id, exam_id, question_id, expected_answer, embedding, max_marks,
-                       domain, rubric_override, sort_order, created_at
+                       domain, rubric_override, sort_order, section, section_pick, created_at
                 FROM public.answer_keys
                 WHERE exam_id = %s
                 ORDER BY sort_order ASC, question_id ASC
@@ -1114,8 +1120,10 @@ def update_evaluation_question(
             break
     if not updated:
         raise ValueError("region_index not found")
-    total_marks = round(sum(float(q.get("awarded_marks") or 0) for q in questions), 1)
-    max_total = round(sum(float(q.get("max_marks") or 0) for q in questions), 1)
+    from autograder.totals import apply_section_choice
+
+    # A patch can change which answers a choice section counts, so recompute the whole total.
+    total_marks, max_total, _ = apply_section_choice(questions)
     flags = list(row.get("flags") or [])
     if "human_override" not in flags:
         flags.append("human_override")
@@ -1322,6 +1330,20 @@ def _resolve_document_ids(
     return out if out else None
 
 
+_FTS_TOKEN = re.compile(r"[a-z0-9]{2,}")
+
+
+def _fts_or_query(query: str, *, max_terms: int = 40) -> str:
+    """``a | b | c`` for ``to_tsquery``: alphanumeric tokens only (no tsquery operators can be injected), deduped."""
+    seen: List[str] = []
+    for tok in _FTS_TOKEN.findall((query or "").lower()):
+        if tok not in seen:
+            seen.append(tok)
+        if len(seen) >= max_terms:
+            break
+    return " | ".join(seen)
+
+
 def search_rag_chunks_bm25(
     query: str,
     *,
@@ -1329,8 +1351,13 @@ def search_rag_chunks_bm25(
     document_id: Optional[str] = None,
     document_ids: Optional[List[str]] = None,
 ) -> List[Dict[str, Any]]:
-    """Keyword search on ``rag_chunks.text_content`` (requires ``idx_rag_chunks_text_fts``)."""
-    q = (query or "").strip()
+    """
+    Keyword search on ``rag_chunks.text_content`` (requires ``idx_rag_chunks_text_fts``).
+
+    Terms are OR-ed and ranked by ``ts_rank_cd``. ``plainto_tsquery`` AND-ed every word, so grading queries (a whole
+    model answer or OCR transcript) matched nothing and hybrid search silently became vector-only.
+    """
+    q = _fts_or_query(query)
     if not q:
         return []
     top_k = max(1, min(100, int(top_k)))
@@ -1343,11 +1370,11 @@ def search_rag_chunks_bm25(
                     SELECT chunk_id, document_id, chunk_index, text_content, meta,
                            ts_rank_cd(
                                to_tsvector('english', text_content),
-                               plainto_tsquery('english', %s)
+                               to_tsquery('english', %s)
                            ) AS bm25_score
                     FROM public.rag_chunks
                     WHERE document_id = %s
-                      AND to_tsvector('english', text_content) @@ plainto_tsquery('english', %s)
+                      AND to_tsvector('english', text_content) @@ to_tsquery('english', %s)
                     ORDER BY bm25_score DESC
                     LIMIT %s
                     """,
@@ -1359,11 +1386,11 @@ def search_rag_chunks_bm25(
                     SELECT chunk_id, document_id, chunk_index, text_content, meta,
                            ts_rank_cd(
                                to_tsvector('english', text_content),
-                               plainto_tsquery('english', %s)
+                               to_tsquery('english', %s)
                            ) AS bm25_score
                     FROM public.rag_chunks
                     WHERE document_id = ANY(%s::text[])
-                      AND to_tsvector('english', text_content) @@ plainto_tsquery('english', %s)
+                      AND to_tsvector('english', text_content) @@ to_tsquery('english', %s)
                     ORDER BY bm25_score DESC
                     LIMIT %s
                     """,
@@ -1375,10 +1402,10 @@ def search_rag_chunks_bm25(
                     SELECT chunk_id, document_id, chunk_index, text_content, meta,
                            ts_rank_cd(
                                to_tsvector('english', text_content),
-                               plainto_tsquery('english', %s)
+                               to_tsquery('english', %s)
                            ) AS bm25_score
                     FROM public.rag_chunks
-                    WHERE to_tsvector('english', text_content) @@ plainto_tsquery('english', %s)
+                    WHERE to_tsvector('english', text_content) @@ to_tsquery('english', %s)
                     ORDER BY bm25_score DESC
                     LIMIT %s
                     """,
@@ -1437,6 +1464,7 @@ def hybrid_search_rag_chunks(
             row = dict(h)
             row.setdefault("vector_distance", None)
             payload[cid] = row
+        payload[cid]["fts_match"] = True
 
     ordered = sorted(scores.items(), key=lambda x: x[1], reverse=True)[:top_k]
     from autograder.rag.similarity import annotate_hits_with_similarity, filter_hits_by_threshold
@@ -1447,6 +1475,9 @@ def hybrid_search_rag_chunks(
         row["fused_score"] = fused
         fused_rows.append(row)
     annotated = annotate_hits_with_similarity(fused_rows, embedding)
+    # annotate_hits_with_similarity re-sorts by cosine score; restore the fused (RRF) order so the keyword
+    # half of the search actually affects ranking.
+    annotated.sort(key=lambda r: float(r.get("fused_score") or 0.0), reverse=True)
     return filter_hits_by_threshold(annotated, min_keep=min(1, top_k))
 
 

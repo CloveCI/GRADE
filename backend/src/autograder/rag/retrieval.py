@@ -116,6 +116,10 @@ def _sort_sheet_hits_for_region(
     return sorted(hits, key=_rank)
 
 
+def _hit_question(hit: Dict[str, Any]) -> str:
+    return str((hit.get("meta") or {}).get("question_id") or "").strip().lower()
+
+
 def _hits_for_question(
     hits: List[Dict[str, Any]],
     question_id: str,
@@ -409,8 +413,15 @@ def retrieve_context_for_grading(
     per_corpus = max(top_k, 4)
 
     key_hits = hybrid_search_for_keys(exam_id, _key_corpus_query(key), top_k=per_corpus)
-    key_hits = _hits_for_question(key_hits, qid, corpus="answer_key")
-    key_hits = filter_hits_by_threshold(key_hits, min_keep=1)
+    if qid:
+        # Only this question's model-answer excerpts. Other questions' keys used to appear under "Question N",
+        # inviting the LLM to credit content that belongs to a different answer.
+        own = [h for h in key_hits if _hit_question(h) == qid.lower()]
+        key_hits = own or list_rag_chunks_for_corpus(
+            keys_document_id(exam_id), question_id=qid, limit=per_corpus
+        )
+    else:
+        key_hits = filter_hits_by_threshold(key_hits, min_keep=1)
 
     sheet_query = _sheet_corpus_query(student_text, key)
     sheet_hits: List[Dict[str, Any]] = []
@@ -429,6 +440,10 @@ def retrieve_context_for_grading(
         )
     sheet_hits = _sort_sheet_hits_for_region(sheet_hits, region_index)
     sheet_hits = _hits_for_question(sheet_hits, qid, corpus="sheet")
+    if qid:
+        own_sheet = [h for h in sheet_hits if _hit_question(h) == qid.lower()]
+        if own_sheet:
+            sheet_hits = own_sheet
     if not sheet_hits or len(sheet_hits) < 2:
         sheet_hits = filter_hits_by_threshold(sheet_hits, min_keep=1)
 

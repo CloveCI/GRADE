@@ -7,7 +7,6 @@ Adapted from ``processing/embedder.py``: chunk → batch embed → upsert, scope
 from __future__ import annotations
 
 import logging
-import os
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
@@ -165,10 +164,49 @@ def _pdf_page_count(path: Path) -> int:
 
 
 def _preprocess_options_from_env() -> Dict[str, Any]:
-    opts: Dict[str, Any] = {}
-    if os.environ.get("GRADE_OCR_FULL_PAGE", "").strip().lower() in {"1", "true", "yes", "on"}:
-        opts["full_page"] = True
-    return opts
+    # Same options as evaluate (render scale, patch size, padding, full page), so ingest segments the sheet identically.
+    return preprocess_options_from_env()
+
+
+def index_sheet_ocr(
+    sheet_id: str,
+    exam_id: str,
+    *,
+    source_path: str,
+    regions: List[Dict[str, Any]],
+    preprocess: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """
+    Replace ``sheet_{sheet_id}`` in ``rag_chunks`` with chunks of OCR text that was already produced.
+
+    Called by evaluate with the transcript it is about to grade, so retrieval never serves an older OCR run.
+    ``regions`` items: ``region_id``, ``question_id``, ``text``, ``ocr_engine``, ``ocr_confidence``, ``flags``.
+    """
+    document_id = sheet_document_id(sheet_id)
+    delete_rag_chunks_for_document(document_id)
+    usable = [r for r in regions if (r.get("text") or "").strip()]
+    if not usable:
+        return {"status": "skipped", "reason": "no_text", "sheet_id": sheet_id, "document_id": document_id}
+    resolved = str(Path(source_path).resolve())
+    payload = build_rag_payload(
+        source_path=resolved,
+        page=0,
+        regions=usable,
+        preprocess=preprocess or {},
+        document_id=document_id,
+    )
+    rows = rag_rows_for_postgres(payload)
+    qid_by_region = {str(r.get("region_id")): str(r.get("question_id") or "") for r in usable}
+    for row in rows:
+        meta = dict(row.get("meta") or {})
+        meta.update(kind="sheet", sheet_id=sheet_id, exam_id=exam_id, source_path=resolved, document_id=document_id)
+        qid = qid_by_region.get(str(meta.get("region_id") or ""))
+        if qid:
+            meta["question_id"] = qid
+        row["meta"] = meta
+    n = upsert_rag_chunks_batch(rows)
+    logger.info("index_sheet_ocr sheet=%s document_id=%s chunks=%s", sheet_id, document_id, n)
+    return {"status": "success", "sheet_id": sheet_id, "document_id": document_id, "chunks_saved": n}
 
 
 def ingest_sheet_rag(

@@ -44,7 +44,13 @@ from autograder.db import (
     update_evaluation_question,
 )
 from autograder.embeddings import embed_text_local
-from autograder.rag.ingest import ingest_keys_rag, ingest_sheet_rag, keys_document_id, sync_exam_ingest
+from autograder.rag.ingest import (
+    ingest_keys_rag,
+    ingest_sheet_rag,
+    keys_document_id,
+    sheet_document_id,
+    sync_exam_ingest,
+)
 from autograder.rag.retrieval import (
     hybrid_search_for_exam,
     hybrid_search_for_sheet,
@@ -429,6 +435,8 @@ def upload_key(payload: UploadKeyRequest):
             domain=q.domain,
             rubric_override=q.rubric_override,
             sort_order=sort_base + i,
+            section=q.section,
+            section_pick=q.section_pick,
         )
         key_ids.append(key_id)
     try:
@@ -767,7 +775,14 @@ def api_rag_search(payload: Dict):
         from autograder.db import hybrid_search_rag_chunks
 
         qv = embed_text_local(query)
-        hits = hybrid_search_rag_chunks(query, qv, top_k=top_k, document_id=None)
+        doc_ids = None
+        if exam_id:
+            # Search this exam's own corpora. Searching everything and dropping other exams afterwards
+            # could return fewer than top_k hits, or none.
+            doc_ids = [keys_document_id(exam_id)] + [
+                sheet_document_id(str(s["id"])) for s in list_sheets(exam_id=exam_id, limit=1000)
+            ]
+        hits = hybrid_search_rag_chunks(query, qv, top_k=top_k, document_ids=doc_ids)
     out = []
     for h in hits:
         m = h.get("meta") or {}

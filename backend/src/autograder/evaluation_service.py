@@ -14,7 +14,6 @@ from autograder.db import (
     insert_evaluation_result,
     list_answer_keys,
     list_results,
-    list_sheet_question_answers,
     upsert_sheet_question_answers,
     update_sheet_question_regions,
 )
@@ -238,11 +237,6 @@ def run_evaluation(req: EvaluateRequest, progress_callback: ProgressCallback = N
 
     total_patches = len(patches)
 
-    persisted_answers = {
-        str(a.get("question_id") or ""): a
-        for a in list_sheet_question_answers(req.sheet_id)
-    }
-
     def _qr_for(idx: int, key: Dict[str, Any]) -> Optional[dict]:
         return next(
             (
@@ -264,49 +258,83 @@ def run_evaluation(req: EvaluateRequest, progress_callback: ProgressCallback = N
     question_answer_rows: List[dict] = []
     all_flags: List[str] = []
     ocr_engines: List[str] = []
-    llm_model = "fallback-legacy"
+    llm_labels: List[str] = []
 
-    for idx, patch in enumerate(patches):
+    def _progress(start: int, span: int, stage: str, idx: int) -> None:
         if progress_callback:
             progress_callback(
-                int(10 + (idx / max(total_patches, 1)) * 85),
-                "ocr_evaluate",
+                int(start + (idx / max(total_patches, 1)) * span),
+                stage,
                 {"question_index": idx + 1, "question_total": total_patches},
             )
 
+    # Pass 1: read every question region once.
+    ocr_by_idx: List[Dict[str, Any]] = []
+    for idx, patch in enumerate(patches):
+        _progress(10, 40, "ocr_read", idx)
+        ocr_parts = (pp.ocr_patch_groups or [[]])[idx] if pp.ocr_patch_groups else [patch]
+        if not ocr_parts:
+            ocr_parts = [patch]
+        texts: List[str] = []
+        confs: List[float] = []
+        engines: List[str] = []
+        oflags: List[str] = []
+        for ocr_patch_img in ocr_parts:
+            ocr_res = ocr_patch_consensus(ocr_patch_img) if req.use_consensus_ocr else ocr_patch(ocr_patch_img)
+            engines.append(ocr_res.engine)
+            if (ocr_res.text or "").strip():
+                texts.append((ocr_res.text or "").strip())
+            confs.append(float(ocr_res.confidence))
+            oflags.extend(ocr_res.flags or [])
+        engine = ",".join(sorted(set(engines))) or "unknown"
+        ocr_engines.append(engine)
+        ocr_by_idx.append({"text": "\n\n".join(texts).strip(), "confs": confs, "flags": oflags, "engine": engine})
+
+    # Index exactly this OCR as the sheet's retrieval corpus, replacing any older snapshot, so the STUDENT SIDE
+    # excerpts the LLM sees always come from the transcript being graded (job uploads defer indexing to here).
+    if progress_callback:
+        progress_callback(50, "index_sheet", {})
+    try:
+        from autograder.rag.ingest import index_sheet_ocr
+
+        index_sheet_ocr(
+            req.sheet_id,
+            req.exam_id,
+            source_path=str(sheet["path"]),
+            regions=[
+                {
+                    "region_id": pp.region_ids[i] if i < len(pp.region_ids or []) else f"R{i + 1}",
+                    "question_id": str(keys[min(i, len(keys) - 1)].get("question_id") or f"Q{i + 1}"),
+                    "text": o["text"],
+                    "ocr_engine": o["engine"],
+                    "ocr_confidence": (sum(o["confs"]) / len(o["confs"])) if o["confs"] else 0.0,
+                    "flags": sorted(set(o["flags"])),
+                }
+                for i, o in enumerate(ocr_by_idx)
+            ],
+            preprocess={"regions_per_page": regions_per_page, "pages": pp.diagnostics.get("pages") or []},
+        )
+    except Exception as e:
+        logger.warning("Could not index sheet OCR for retrieval sheet=%s: %s", req.sheet_id, e)
+        all_flags.append("sheet_index_failed")
+
+    # Pass 2: retrieve context and grade each question.
+    for idx, patch in enumerate(patches):
+        _progress(55, 40, "ocr_evaluate", idx)
         key = keys[min(idx, len(keys) - 1)]
         qid = str(key.get("question_id") or "")
         qr_item = _qr_for(idx, key)
         page_info = _page_fields(qr_item)
-        stored = persisted_answers.get(qid) or {}
-        ocr_parts = (pp.ocr_patch_groups or [[]])[idx] if pp.ocr_patch_groups else [patch]
-        if not ocr_parts:
-            ocr_parts = [patch]
-        ocr_texts: List[str] = []
-        ocr_confs: List[float] = []
-        ocr_engines_part: List[str] = []
-        ocr_flags: List[str] = []
-        for ocr_patch_img in ocr_parts:
-            ocr_res = ocr_patch_consensus(ocr_patch_img) if req.use_consensus_ocr else ocr_patch(ocr_patch_img)
-            ocr_engines_part.append(ocr_res.engine)
-            if (ocr_res.text or "").strip():
-                ocr_texts.append((ocr_res.text or "").strip())
-            ocr_confs.append(float(ocr_res.confidence))
-            ocr_flags.extend(ocr_res.flags or [])
-        ocr_engines.append(",".join(sorted(set(ocr_engines_part))) or "unknown")
-        raw_ocr = "\n\n".join(ocr_texts).strip()
+        ocr_confs: List[float] = ocr_by_idx[idx]["confs"]
+        ocr_flags: List[str] = list(ocr_by_idx[idx]["flags"])
+        raw_ocr = ocr_by_idx[idx]["text"]
+        # The corpus was just built from raw_ocr, so this only reports which chunks belong to the question.
         sheet_rag = retrieve_sheet_answer_for_question(
             req.sheet_id,
             key,
             question_region=qr_item,
             region_ocr=raw_ocr,
         )
-        rag_text = (sheet_rag.get("text") or "").strip()
-        if rag_text:
-            if not raw_ocr or len(rag_text) > len(raw_ocr):
-                raw_ocr = rag_text
-            elif rag_text not in raw_ocr:
-                raw_ocr = f"{raw_ocr}\n\n{rag_text}".strip()
         ocr_confidence = sum(ocr_confs) / len(ocr_confs) if ocr_confs else 0.0
         # Isolated regions are 1:1 with answer keys — grade the full OCR transcript.
         ocr_for_grading = raw_ocr.strip()
@@ -349,6 +377,8 @@ def run_evaluation(req: EvaluateRequest, progress_callback: ProgressCallback = N
                     grading_confidence="low",
                     ocr_confidence=float(ocr_confidence),
                     flags=list(set(ocr_flags)) + ["ocr_empty", "review_required"],
+                    section=key.get("section"),
+                    section_pick=key.get("section_pick"),
                 )
             )
             continue
@@ -376,8 +406,10 @@ def run_evaluation(req: EvaluateRequest, progress_callback: ProgressCallback = N
             rubric_override=chosen.get("rubric_override"),
             rag_context=rag_ctx.get("context_text"),
         )
+        llm_labels.append(llm_model)
         flags = list(set(ocr_flags + formatted.flags + eval_res.flags))
-        if rag_ctx.get("chunk_ids"):
+        # chunk_ids always carries the key's own id, so it cannot tell whether anything was retrieved.
+        if rag_ctx.get("key_hit_count") or rag_ctx.get("sheet_hit_count"):
             flags.append("rag_context_used")
         if sheet_rag.get("chunk_ids"):
             flags.append("sheet_rag_by_question")
@@ -399,8 +431,10 @@ def run_evaluation(req: EvaluateRequest, progress_callback: ProgressCallback = N
                 rubric_scores=eval_res.rubric_scores,
                 feedback=eval_res.feedback,
                 grading_confidence=eval_res.grading_confidence,
-            ocr_confidence=ocr_confidence,
-            flags=flags,
+                ocr_confidence=ocr_confidence,
+                flags=flags,
+                section=chosen.get("section"),
+                section_pick=chosen.get("section_pick"),
             )
         )
         question_answer_rows.append(
@@ -419,14 +453,52 @@ def run_evaluation(req: EvaluateRequest, progress_callback: ProgressCallback = N
             }
         )
 
-    total_marks = round(sum(q.awarded_marks for q in q_results), 1)
-    max_total = round(sum(q.max_marks for q in q_results), 1)
+    # Keys with no answer region (segmentation found fewer regions than keys) used to vanish from the result and
+    # from max_total, making a partial grade look complete. List them with zero marks instead.
+    for j, key in enumerate(keys[len(patches):]):
+        q_results.append(
+            QuestionResult(
+                question_id=key["question_id"],
+                question_text=question_texts.get(key["question_id"], ""),
+                region_index=len(patches) + j,
+                pages=[],
+                student_answer="",
+                ocr_raw="",
+                awarded_marks=0.0,
+                max_marks=float(key["max_marks"]),
+                rubric_scores=RubricScores(
+                    factual_accuracy=0, conceptual_completeness=0, reasoning=0, domain_terminology=0
+                ),
+                feedback=(
+                    f"No answer region was found for this question: segmentation produced {len(patches)} "
+                    f"region(s) for {len(keys)} answer-key question(s). Set the layout (strips per page) and re-grade."
+                ),
+                grading_confidence="low",
+                ocr_confidence=0.0,
+                flags=["region_missing", "review_required"],
+                section=key.get("section"),
+                section_pick=key.get("section_pick"),
+            )
+        )
+    if len(patches) < len(keys):
+        all_flags.append("region_missing")
+
+    from autograder.totals import apply_section_choice
+
+    question_dicts = [q.model_dump() for q in q_results]
+    total_marks, max_total, section_flags = apply_section_choice(question_dicts)
+    all_flags.extend(section_flags)
+    q_results = [QuestionResult.model_validate(d) for d in question_dicts]
+    # One label for the whole sheet: the grader every question used, or all of them when it varied
+    # (e.g. a provider failed midway and some questions fell back to similarity scoring).
+    distinct = list(dict.fromkeys(llm_labels))
+    llm_model = distinct[0] if len(distinct) == 1 else ("mixed: " + ", ".join(distinct) if distinct else "none")
     grading_conf = aggregate_grading_confidence([q.grading_confidence for q in q_results])
     confidence_flag = any(q.ocr_confidence < 0.60 for q in q_results) or grading_conf == "low"
     payload = {
         "sheet_id": req.sheet_id,
         "exam_id": req.exam_id,
-        "questions": [q.model_dump() for q in q_results],
+        "questions": question_dicts,
         "total_marks": total_marks,
         "max_total": max_total,
         "confidence_flag": confidence_flag,
