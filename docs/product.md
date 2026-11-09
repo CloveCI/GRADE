@@ -4,8 +4,8 @@
 
 ## In one paragraph
 GRADE (Generalized Recognition and Automated Document Evaluator) grades handwritten exam answer sheets. A teacher uploads a
-marking scheme (answer key) and a scanned student sheet; GRADE splits each page into answer strips, reads the handwriting with
-OCR, pairs each region with its answer-key question by position, and scores each question against a rubric with an LLM. The teacher reviews the
+marking scheme (answer key) and a scanned student sheet; GRADE finds each answer on the sheet using the marking scheme, reads the
+handwriting with OCR, pairs answer *n* with question *n*, and scores each question against a rubric with an LLM. The teacher reviews the
 result in a web portal, can correct individual scores, and downloads a PDF report. It is a B.E. Computer Science academic mini
 project (GRADE v2) by Md Afeeduddin and Syed Liyaqat, tuned for CIE-style internal exams with several questions per sheet.
 
@@ -16,14 +16,20 @@ project (GRADE v2) by Md Afeeduddin and Syed Liyaqat, tuned for CIE-style intern
 | Choice sections ("any 2 of 3") | Live for PDF keys | Best answers counted, paper maximum respected; the DOCX parser does not read PART lines yet |
 | Sheet upload (PDF or image) | Live | Stored under `backend/data/uploads/`. The portal's job routes skip OCR at upload; the sync `/upload/sheet` and `/upload/exam-bundle` routes OCR and index the sheet immediately |
 | Answer layout (where each answer is) | Live | Automatic from page OCR lines, margin labels and the model answers (needs PaddleOCR); 17 of 18 boundaries right on three CIE samples. A layout the teacher enters overrides it |
-| Handwriting OCR | Live | Google Vision tier 1; Azure, PaddleOCR, TrOCR as fallbacks when installed and configured |
+| Handwriting OCR | Live | Google Vision tier 1 (not yet validated); Azure, PaddleOCR (2.x and 3.x), TrOCR as fallbacks. Local PaddleOCR reads CIE handwriting at confidence 0.70-0.77: readable but noisy |
+| Matching answers to questions | Partial | By position: answer *n* is graded against question *n*. Skipped or out-of-order answers are graded against the wrong question |
 | Hybrid retrieval (pgvector + full-text) | Live | Evaluate indexes the OCR it grades; KEY SIDE limited to the graded question. MiniLM embeddings when `sentence-transformers` is installed, hash otherwise |
-| LLM rubric scoring | Live when configured | Gemini, then OpenRouter; with `GRADE_ENABLE_LLM` off it uses a cosine-similarity fallback |
+| LLM rubric scoring | Live when configured | Gemini, then OpenRouter (validated with `google/gemini-2.5-flash-lite`); with `GRADE_ENABLE_LLM` off, or every provider failing, a cosine-similarity fallback labelled `fallback-legacy` |
+| OCR clean-up before grading | Live | Heuristics plus an optional LLM pass that never sees the model answer; rewrites towards the key are rejected |
 | Teacher review and score patch (HITL) | Live | `PATCH /result/{id}/questions/{region_index}` from the evaluator page |
 | PDF report | Live | ReportLab, `report_pdf.py` |
 | Hosted deployment | Not built | Runs on a developer machine; nothing deploys automatically |
 | Authentication / multi-user access | Not built | The API has no auth; do not expose it to the internet |
-| Measured grading accuracy | Partial | Sample sheets in `backend/cie/`; no published agreement metrics yet |
+| Measured grading accuracy | Not measured | One sheet graded end to end (16.8 / 20); no comparison with a human examiner yet |
+
+## How far to trust a result
+A first-pass grade for a teacher to review. The evidence behind each "Live" above, what was not tested, and a checklist for
+reviewing a grade are in [`operations/validation.md`](operations/validation.md).
 
 ## What it is not
 Not a hosted service, not a proctoring or plagiarism tool, and not a replacement for the examiner: every score is meant to be

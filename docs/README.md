@@ -1,6 +1,6 @@
 # Documentation
 
-> **Audience:** everyone · **Scope:** the map of all documentation · **Last verified:** 2026-11-08
+> **Audience:** everyone · **Scope:** the map of all documentation · **Last verified:** 2026-11-09
 
 Start in this order if you are new: [`product.md`](product.md) → [setup](getting-started/setup.md) →
 [repo map](getting-started/repo-map.md) → [glossary](getting-started/glossary.md) → [architecture overview](architecture/overview.md).
@@ -10,6 +10,7 @@ Start in this order if you are new: [`product.md`](product.md) → [setup](getti
 | I want to... | Read |
 |---|---|
 | Understand what GRADE is and what is true today | [`product.md`](product.md) |
+| Know what has been tested and how far to trust a grade | [`operations/validation.md`](operations/validation.md) |
 | Get the code running | [`getting-started/setup.md`](getting-started/setup.md) |
 | Find where something lives | [`getting-started/repo-map.md`](getting-started/repo-map.md) |
 | Decode a term (strip, region, layout, rubric...) | [`getting-started/glossary.md`](getting-started/glossary.md) |

@@ -9,7 +9,8 @@ Works end to end on the bundled CIE samples (`backend/cie/`). Verified on 2026-1
 and OpenRouter `google/gemini-2.5-flash-lite`, with **no layout entered**: the reformatted Disaster Mitigation key parsed into
 6 questions (2/2/2/7/7/7, Part B best 2 of 3), automatic layout found all 6 answers, and the sheet scored 16.8 / 20.
 Without credentials it still runs: OCR uses whatever local engines are installed and scoring falls back to cosine
-similarity, which is only a rough signal. Agreement with human examiners has not been measured.
+similarity, which is only a rough signal. Agreement with human examiners has not been measured. Evidence, untested parts and
+input requirements: [`../operations/validation.md`](../operations/validation.md).
 
 ## How it works
 1. **Key upload.** DOCX, JSON or PDF is parsed into one row per question with model answer, max marks and, when the paper
@@ -60,6 +61,9 @@ similarity, which is only a rough signal. Agreement with human examiners has not
 | `data/previews/{sheet_id}/` | `pageN.png`, `regions.json` |
 
 ## Failure modes
+- **An answer graded against the wrong question**: the student skipped a question or answered out of order; pairing is by
+  position (region *n* ↔ key *n*) → review in the evaluator and correct the scores; pairing by the student's own answer
+  labels is the planned fix.
 - **`region_missing` on some questions**: fewer regions than keys (automatic layout could not run and no layout was given)
   → install PaddleOCR (`pip install -e ".[ocr_paddle]"`) or enter the layout, then re-grade.
 - **A boundary off by a line or two** (seen once in three samples: DAA Q1/Q2): the answer labels were not detected and two

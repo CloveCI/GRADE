@@ -1,7 +1,7 @@
 # backend
 
 > **Audience:** developers working in `backend/` · **Scope:** what the API does, startup, configuration, run, tests ·
-> **Last verified:** 2026-11-08 (`api.py`, `db.py`, `jobs.py`, `pyproject.toml`, `tests/conftest.py`)
+> **Last verified:** 2026-11-09 (`api.py`, `db.py`, `jobs.py`, `evaluation_service.py`, `pyproject.toml`, `tests/conftest.py`)
 
 **Runs as** a local `uvicorn autograder.api:app` process on `127.0.0.1:8000`; there is no Dockerfile or hosted deploy. It owns
 answer keys, sheets, grading and reports, and is the only component that talks to Postgres, OCR and LLM providers.
@@ -27,7 +27,8 @@ answer keys, sheets, grading and reports, and is the only component that talks t
 ## Configuration
 Environment variables only; `backend/.env.example` documents each one. The ones that matter most:
 `GRADE_DATABASE_URL` (required), `GOOGLE_APPLICATION_CREDENTIALS` or `GOOGLE_CLOUD_VISION_API_KEY` (OCR),
-`GRADE_ENABLE_LLM` + `GRADE_GEMINI_API_KEY` / `GRADE_OPENROUTER_API_KEY` (scoring), `GRADE_CORS_ORIGINS`,
+`GRADE_ENABLE_LLM` + `GRADE_GEMINI_API_KEY` and/or `GRADE_OPENROUTER_API_KEY` (scoring; either alone works; `GRADE_OPENROUTER_MODEL`
+selects the model), `GRADE_CORS_ORIGINS`,
 `GRADE_EMBED_BACKEND` (`minilm` is used automatically when `sentence-transformers` is installed; `hash` forces deterministic
 vectors), `GRADE_RAG_SIM_THRESHOLD` / `GRADE_RAG_SIM_TEMPERATURE` (retrieval filtering). Optional dependency groups in `pyproject.toml`: `api`, `dev`,
 `ocr_google`, `ocr_azure`, `ocr_paddle`, `ocr_trocr`, `llm_gemini`, `embeddings`, `all`.
@@ -49,5 +50,9 @@ API and RAG tests fail with `OperationalError` or 503 when it is not running.
 - **Port 5433 already in use:** another Postgres on 5433 gives `password authentication failed for user "grade"`.
 - **Jobs are in-process threads:** restarting the API abandons running jobs; their rows stay `running`.
 - **No auth:** bind to `127.0.0.1`; do not expose the API publicly.
+- **Automatic layout needs PaddleOCR** even when Google Vision does the reading. Without it, evaluate falls back to a preset
+  or flags `region_missing`. Evaluate takes about 2-3 minutes for a 3-page sheet on CPU; finding answer positions is ~60 s of it.
+- **`.env` is read at startup only:** after changing a key, restart uvicorn. An OpenRouter `401 User not found` means the
+  key is revoked or unknown, not a GRADE bug.
 - **Changing the embedding backend** (installing or removing `sentence-transformers`) leaves vectors from the old backend in
   `answer_key_chunks` / `rag_chunks`; re-upload keys and re-ingest sheets, or similarity scores stop meaning anything.

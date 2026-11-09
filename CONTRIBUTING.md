@@ -56,6 +56,8 @@ disagreed and the last question was never graded.
 - Add a test with the fix. Tests mock OCR engines and LLM providers: nothing in CI calls Google, Azure, Gemini or OpenRouter.
   Postgres is real (a pgvector service container in CI, Docker locally).
 - Do not weaken or delete a test to make it pass.
+- A change to segmentation, automatic layout, OCR, key parsing or scoring is re-checked on the CIE samples in `backend/cie/`,
+  and [`docs/operations/validation.md`](docs/operations/validation.md) is updated with the new results in the same PR.
 
 ## Security
 

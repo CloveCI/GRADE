@@ -12,6 +12,10 @@ portal as in [setup](../getting-started/setup.md). To verify: `GET http://127.0.
 Check out the previous good commit on `main` (or revert the bad promotion PR on `staging` and promote again), then restart
 the API. The schema only ever adds tables and columns, so older code runs against a newer database.
 
+## Checking a grade
+Before a grade is shared, work through the checklist in [`validation.md`](validation.md#before-trusting-a-grade): region boxes,
+flags, grader label, choice sections.
+
 ## Reset local data
 ```bash
 cd backend
@@ -28,7 +32,9 @@ PYTHONPATH=src python -c "import autograder.api; from autograder.db import init_
 | Supabase connection fails or resolves to IPv6 | Pooler / DNS issue | `PYTHONPATH=src python scripts/diagnose_pg_dns.py`; `GRADE_PG_PREFER_ADDR_FAMILY`, `GRADE_PG_SKIP_HOSTADDR_RESOLVE` and `GRADE_DATABASE_HOSTADDR` are read in `db.py` (not yet in `.env.example`) |
 | Job stuck at a stage | API restarted mid-job (jobs are in-process threads) | Start the job again from the portal |
 | OCR text empty | No OCR engine configured | Set `GOOGLE_APPLICATION_CREDENTIALS`; check `/api/integrations` |
-| Scores from `fallback-legacy` | LLM disabled or both providers failed | Set `GRADE_ENABLE_LLM=true` and a Gemini or OpenRouter key; check the API log |
+| Scores from `fallback-legacy` | LLM disabled or every provider failed; the feedback names the provider and error | Set `GRADE_ENABLE_LLM=true` and a Gemini or OpenRouter key; restart the API |
+| OpenRouter `401 User not found` in feedback | Key revoked, deleted or mistyped | Create a new key at openrouter.ai/keys, put it in `backend/.env`, restart the API |
+| A question's grade is for a different answer | Student skipped a question or answered out of order (pairing is by position) | Correct the scores in the evaluator; see [validation](validation.md#known-limits) |
 | Inspect page / `/api/sheet/{id}/chunks` shows no sheet chunks | The sheet has not been evaluated yet (evaluate indexes it) | Evaluate the sheet, or `POST /api/sheet/{id}/ingest` |
 | Questions graded 0 with `region_missing` | Automatic layout could not run (PaddleOCR missing) and no layout was entered | `pip install -e ".[ocr_paddle]"`, or enter the layout, then re-grade |
 | Evaluator shows no page images | Previews missing for the sheet | Open the sheet preview with `rebuild=true` (`/api/sheet/{id}/preview?rebuild=true`) |
