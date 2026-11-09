@@ -2,7 +2,6 @@ import { useEffect, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import AppShell from '../components/AppShell';
 import { formatExamName } from '../lib/examLabels';
-import { EXAM_REGION_HINTS } from '../lib/examLayouts';
 import { getExamDetail, GRADE_SESSION, reportPdfUrl, saveGradeSession } from '../lib/api';
 
 function formatDate(iso) {
@@ -39,7 +38,7 @@ export default function ExamDetailPage() {
       examId: sheet.exam_id || examId,
       sheetId: sheet.id,
       filename: sheet.filename,
-      regionsPerPage: EXAM_REGION_HINTS[examId] ?? undefined,
+      regionsPerPage: undefined, // detected automatically unless the teacher sets a layout
     });
     sessionStorage.removeItem(GRADE_SESSION.resultId);
     navigate('/evaluator');

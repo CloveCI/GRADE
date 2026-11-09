@@ -3,7 +3,6 @@ import { Link, useNavigate } from 'react-router-dom';
 import AppShell from '../components/AppShell';
 import { useApiStatus } from '../hooks/useApiStatus';
 import { formatExamName } from '../lib/examLabels';
-import { hintForExam, hintForKeyCount } from '../lib/examLayouts';
 import { pollJob, stageLabel } from '../lib/jobs';
 import {
   createUploadBundleJob,
@@ -167,20 +166,6 @@ export default function UploadPage() {
       }
     })();
   }, [markConnected]);
-
-  useEffect(() => {
-    const resolved = examId === '__new__' ? '' : examId;
-    const preset = hintForExam(resolved);
-    if (preset) {
-      setRegionsSpec(preset);
-      return;
-    }
-    const exam = exams.find((e) => e.id === resolved);
-    if (exam?.key_count === 6) {
-      const fromKeys = hintForKeyCount(exam.key_count);
-      if (fromKeys) setRegionsSpec(fromKeys);
-    }
-  }, [examId, exams]);
 
   useEffect(() => {
     const storedJob = sessionStorage.getItem(GRADE_SESSION.jobId);
@@ -473,8 +458,8 @@ export default function UploadPage() {
               </button>
               {showAdvanced && (
                 <div style={{ marginTop: '0.75rem' }}>
-                  <label className="form-label" htmlFor="regions-spec">Answer layout (comma-separated rows per page)</label>
-                  <input id="regions-spec" className="form-input" placeholder="e.g. 3,1,1,1"
+                  <label className="form-label" htmlFor="regions-spec">Answer layout (optional: answers per page, comma-separated)</label>
+                  <input id="regions-spec" className="form-input" placeholder="Leave empty to detect answers automatically, or e.g. 3,1,2"
                     value={regionsSpec} onChange={(e) => setRegionsSpec(e.target.value)} style={{ width: '100%' }} disabled={uploading} />
                 </div>
               )}

@@ -75,13 +75,16 @@ def existing_evaluate_response(req: EvaluateRequest) -> EvaluateResponse | None:
             len(keys),
         )
         return None
-    expected_layout = resolve_regions_per_page(
-        req.exam_id, regions_per_page=req.regions_per_page, num_keys=len(keys)
-    )
+    existing_flags = set(str(f) for f in (row.get("flags") or []))
+    if req.regions_per_page:
+        expected_layout = list(req.regions_per_page)
+    elif "layout:auto" in existing_flags:
+        expected_layout = None  # graded with automatic layout, and no layout was asked for now
+    else:
+        expected_layout = resolve_regions_per_page(req.exam_id, num_keys=len(keys))
     expected_layout_flag = (
         f"layout:{','.join(str(int(n)) for n in expected_layout)}" if expected_layout else None
     )
-    existing_flags = set(str(f) for f in (row.get("flags") or []))
     # Invalidate older cached results produced before layout/mapping fixes.
     if expected_layout_flag and expected_layout_flag not in existing_flags:
         logger.info(
@@ -177,21 +180,36 @@ def run_evaluation(req: EvaluateRequest, progress_callback: ProgressCallback = N
         raise HTTPException(status_code=404, detail="No answer keys found for exam_id")
 
     question_texts = question_text_by_id(req.exam_id)
-    regions_per_page = resolve_regions_per_page(
-        req.exam_id, regions_per_page=req.regions_per_page, num_keys=len(keys)
-    )
 
     from autograder.preprocessing import preprocess_options_from_env
 
+    # Layout precedence: what the teacher entered, else automatic layout from the marking scheme (answer_layout),
+    # else a built-in exam preset only when automatic layout cannot run (e.g. PaddleOCR missing).
+    regions_per_page = list(req.regions_per_page) if req.regions_per_page else None
+    opts = preprocess_options_from_env()
     try:
-        pp = preprocess_sheet_for_evaluation(
-            sheet["path"],
-            exam_id=req.exam_id,
-            num_answer_keys=len(keys),
-            expected_num_regions=req.expected_num_regions,
-            regions_per_page=regions_per_page,
-            **preprocess_options_from_env(),
-        )
+        pp = None
+        if not regions_per_page and req.expected_num_regions is None:
+            pp = preprocess_sheet_for_evaluation(
+                sheet["path"],
+                exam_id=req.exam_id,
+                num_answer_keys=len(keys),
+                key_texts=[str(k.get("expected_answer") or "") for k in keys],
+                **opts,
+            )
+            if not pp.diagnostics.get("auto_layout"):
+                preset = resolve_regions_per_page(req.exam_id, num_keys=len(keys))
+                if preset:
+                    regions_per_page, pp = preset, None
+        if pp is None:
+            pp = preprocess_sheet_for_evaluation(
+                sheet["path"],
+                exam_id=req.exam_id,
+                num_answer_keys=len(keys),
+                expected_num_regions=req.expected_num_regions,
+                regions_per_page=regions_per_page,
+                **opts,
+            )
     except FileNotFoundError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     except RuntimeError as e:
@@ -228,6 +246,7 @@ def run_evaluation(req: EvaluateRequest, progress_callback: ProgressCallback = N
                 "page_end": int(item.get("page_end") or 1),
                 "pages": item.get("pages") or [],
                 "segments": item.get("segments") or [],
+                "auto": bool(item.get("auto")),
             }
         )
     try:
@@ -482,6 +501,7 @@ def run_evaluation(req: EvaluateRequest, progress_callback: ProgressCallback = N
         )
     if len(patches) < len(keys):
         all_flags.append("region_missing")
+    auto_layout = pp.diagnostics.get("auto_layout")
 
     from autograder.totals import apply_section_choice
 
@@ -516,6 +536,7 @@ def run_evaluation(req: EvaluateRequest, progress_callback: ProgressCallback = N
                 if regions_per_page
                 else {"segmentation_v3"}
             )
+            | ({"layout:auto"} if auto_layout else set())
             | ({"layout_region_mismatch"} if layout_mismatch else set())
         ),
     }

@@ -2,7 +2,7 @@ import { useState, useRef, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import Sidebar from '../components/Sidebar';
 import { formatExamName } from '../lib/examLabels';
-import { hintForExam, pageForRegionIndex } from '../lib/examLayouts';
+import { pageForRegionIndex } from '../lib/examLayouts';
 import { confColor } from '../lib/confidence';
 import { pollJob, stageLabel } from '../lib/jobs';
 import {
@@ -13,7 +13,6 @@ import {
   getSheetPreview,
   getSheetQuestionRegions,
   loadGradeSession,
-  parseRegionsPerPage,
   saveGradeSession,
   sheetFileUrl,
   sheetPreviewImageUrl,
@@ -419,44 +418,25 @@ function collapseByQuestionId(questions) {
   return collapsed;
 }
 
+// Only a layout the teacher entered is sent. Without one, the API detects each answer's position from the
+// marking scheme (layout:auto); built-in per-exam presets were wrong for some sheets and are no longer applied here.
 function sessionWithLayout(session) {
-  const layout = parseRegionsPerPage(hintForExam(session.examId));
-  if (layout?.length) {
-    return { ...session, regionsPerPage: layout };
-  }
-  if (session.regionsPerPage?.length) return session;
   return session;
 }
 
 function expectedLayoutFlag(session) {
-  const layout = parseRegionsPerPage(hintForExam(session.examId)) || session.regionsPerPage;
+  const layout = session.regionsPerPage;
   if (!layout?.length) return null;
   return `layout:${layout.join(',')}`;
 }
 
-function layoutNeedsRegrade(session) {
-  const expected = parseRegionsPerPage(hintForExam(session.examId));
-  const current = session.regionsPerPage;
-  if (!expected?.length || !session.examId) return false;
-  if (!current?.length) return true;
-  return current.join(',') !== expected.join(',');
-}
-
 function resultNeedsRegrade(result, keyCount, session = null) {
   if (!result?.questions?.length || !keyCount) return false;
-  if (session && layoutNeedsRegrade(session)) return true;
   if (result.questions.length !== keyCount) return true;
   const flags = new Set((result.flags || []).map(String));
   if (!flags.has('segmentation_v3')) return true;
   const layoutFlag = session ? expectedLayoutFlag(sessionWithLayout(session)) : null;
   if (layoutFlag && !flags.has(layoutFlag)) return true;
-  // Invalidate grades run with single-strip layout on multi-question CIE sheets.
-  if (flags.has('layout:1') && session?.examId && hintForExam(session.examId) === '3,1,2,1') {
-    return true;
-  }
-  if (flags.has('layout:3,1,2,1') && session?.examId && hintForExam(session.examId) === '3,1,1,2') {
-    return true;
-  }
   return false;
 }
 

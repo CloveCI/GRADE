@@ -13,7 +13,7 @@ import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import cv2
 import numpy as np
@@ -658,6 +658,81 @@ def pdf_page_count(image_input: Union[str, Path]) -> int:
         doc.close()
 
 
+def _preprocess_auto_layout(
+    path: Path,
+    pages: int,
+    key_texts: List[str],
+    **pipeline_kwargs: Any,
+) -> Optional[PreprocessResult]:
+    """Per-question strips from ``answer_layout.detect_answer_layout``, shaped like a layout-based result."""
+    from autograder.answer_layout import detect_answer_layout
+
+    patch_size = int(pipeline_kwargs.get("patch_size") or PATCH_SIZE)
+    render_scale = float(pipeline_kwargs.get("pdf_render_scale") or 3.0)
+    grays: List[np.ndarray] = []
+    for page_idx in range(pages):
+        bgr = (
+            load_bgr_from_path(path, pdf_page_index=page_idx, pdf_render_scale=render_scale)
+            if path.suffix.lower() == ".pdf"
+            else load_bgr_from_path(path)
+        )
+        gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+        grays.append(_deskew(gray) if pipeline_kwargs.get("do_deskew", True) else gray)
+    layout = detect_answer_layout(grays, key_texts)
+    if layout is None:
+        return None
+
+    region_ids: List[str] = []
+    raw_segments: List[dict] = []
+    per_page_counter: Dict[int, int] = {}
+    for i, (page, bbox) in enumerate(zip(layout.pages, layout.bboxes)):
+        per_page_counter[page] = per_page_counter.get(page, 0) + 1
+        rid = f"P{page}_R{per_page_counter[page]}"
+        region_ids.append(rid)
+        x, y, w, h = bbox
+        raw_segments.append(
+            {"raw_region_index": i, "region_id": rid, "page": page, "bbox": [x, y, w, h],
+             "x_start": x, "x_end": x + w, "y_start": y, "y_end": y + h, "render_scale": render_scale}
+        )
+    patches, bboxes, ids, ocr_groups = _apply_key_region_groups(
+        layout.crops, layout.bboxes, region_ids, layout.groups, patch_size=patch_size
+    )
+    question_regions: List[dict] = []
+    for q_idx, grp in enumerate(layout.groups):
+        segs = [raw_segments[i] for i in grp]
+        pages_for_q = sorted({int(s["page"]) for s in segs})
+        question_regions.append(
+            {
+                "question_index": q_idx,
+                "region_index": q_idx,
+                "raw_region_indices": list(grp),
+                "region_ids": [str(s["region_id"]) for s in segs],
+                "page_start": pages_for_q[0],
+                "page_end": pages_for_q[-1],
+                "pages": pages_for_q,
+                "segments": segs,
+                "auto": True,
+            }
+        )
+    return PreprocessResult(
+        patches=patches,
+        bboxes=bboxes,
+        region_ids=ids,
+        used_fallback_grid=False,
+        ocr_patch_groups=ocr_groups,
+        diagnostics={
+            "num_regions": len(patches),
+            "pdf_pages": pages,
+            "num_answer_keys": len(key_texts),
+            "regions_per_page": None,
+            "auto_layout": {**layout.diagnostics, "regions_per_page": layout.regions_per_page},
+            "key_region_groups": layout.groups,
+            "question_regions": question_regions,
+            "pages": [{"page": p + 1, "regions": n} for p, n in enumerate(layout.regions_per_page)],
+        },
+    )
+
+
 def preprocess_sheet_for_evaluation(
     image_input: Union[str, Path],
     *,
@@ -665,6 +740,7 @@ def preprocess_sheet_for_evaluation(
     num_answer_keys: int = 0,
     expected_num_regions: int | None = None,
     regions_per_page: List[int] | None = None,
+    key_texts: Optional[List[str]] = None,
     **pipeline_kwargs: Any,
 ) -> PreprocessResult:
     """
@@ -672,12 +748,22 @@ def preprocess_sheet_for_evaluation(
 
     When ``regions_per_page`` is set (e.g. ``[2, 2, 1, 1, 1]`` for CIE DM sheets), each PDF page
     gets that many horizontal strips. Optional per-exam key groups merge raw strips (e.g. Q4 on two pages).
+
+    Without a layout, ``key_texts`` (the model answers, in order) enable automatic layout: each answer's position is
+    found from the sheet's text and margin labels (``answer_layout``). It is skipped, and the behaviour below applies,
+    when it cannot run (no PaddleOCR, too little text) or ``full_page`` / ``expected_num_regions`` is requested.
     """
     from autograder.exam_layouts import key_region_groups
 
     path = Path(image_input)
     pages = pdf_page_count(path)
     patch_size = int(pipeline_kwargs.get("patch_size") or PATCH_SIZE)
+
+    if key_texts and len(key_texts) > 1 and not regions_per_page and expected_num_regions is None and not pipeline_kwargs.get("full_page"):
+        auto = _preprocess_auto_layout(path, pages, key_texts, **pipeline_kwargs)
+        if auto is not None:
+            return auto
+
     groups = key_region_groups(exam_id, num_answer_keys)
 
     if pages == 1 and not groups:
