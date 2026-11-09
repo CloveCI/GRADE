@@ -86,6 +86,53 @@ def _render_page_image(
         logger.warning("preview image failed sheet page=%s: %s", page_idx + 1, e)
 
 
+def _build_auto_layout_preview(
+    sheet_id: str, sheet_path: Path, question_regions: List[Dict[str, Any]]
+) -> Optional[Dict[str, Any]]:
+    """Draw the strips that automatic layout chose (saved on the sheet by evaluate), instead of re-segmenting."""
+    segs = [
+        (int(q.get("question_index") or 0), s)
+        for q in question_regions
+        if q.get("auto")
+        for s in (q.get("segments") or [])
+        if s.get("bbox") and s.get("page")
+    ]
+    if not segs:
+        return None
+    pages = pdf_page_count(sheet_path)
+    out_dir = preview_dir(sheet_id)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    regions_meta: List[Dict[str, Any]] = []
+    for page_idx in range(pages):
+        page_bboxes: List[Tuple[int, int, int, int]] = []
+        page_labels: List[str] = []
+        for q_idx, s in segs:
+            if int(s["page"]) != page_idx + 1:
+                continue
+            f = PREVIEW_RENDER_SCALE / float(s.get("render_scale") or 3.0)
+            x, y, w, h = (int(round(v * f)) for v in s["bbox"])
+            page_bboxes.append((x, y, w, h))
+            page_labels.append(f"Q{q_idx + 1}")
+            regions_meta.append(
+                {"region_index": q_idx, "raw_region_index": int(s.get("raw_region_index") or 0),
+                 "page": page_idx + 1, "bbox": [x, y, w, h]}
+            )
+        _render_page_image(sheet_path, page_idx, page_bboxes, page_labels, out_dir / f"page{page_idx + 1}.png")
+    (out_dir / "regions.json").write_text(
+        json.dumps(
+            {
+                "regions": regions_meta,
+                "regions_per_page": None,
+                "auto_layout": True,
+                "page_count": pages,
+                "preview_render_scale": PREVIEW_RENDER_SCALE,
+            }
+        ),
+        encoding="utf-8",
+    )
+    return {"status": "ok", "sheet_id": sheet_id, "regions": len(regions_meta), "page_count": pages, "auto_layout": True}
+
+
 def build_sheet_preview(sheet_id: str, *, layout: Optional[List[int]] = None) -> Dict[str, Any]:
     row = get_sheet(sheet_id)
     if not row:
@@ -97,6 +144,10 @@ def build_sheet_preview(sheet_id: str, *, layout: Optional[List[int]] = None) ->
 
     exam_id = str(row.get("exam_id") or "")
     keys = list_answer_keys(exam_id) if exam_id else []
+    if not layout:
+        auto = _build_auto_layout_preview(sheet_id, sheet_path, row.get("question_regions") or [])
+        if auto is not None:
+            return auto
     regions_per_page = layout or resolve_regions_per_page(exam_id, num_keys=len(keys))
     groups = key_region_groups(exam_id, len(keys))
     raw_to_key = _raw_to_key_index(groups)
@@ -179,7 +230,10 @@ def _preview_needs_rebuild(sheet_id: str, meta_path: Path) -> bool:
         return True
     if any(r.get("page") is None for r in regions):
         return True
-    if payload.get("regions_per_page") != expected_layout:
+    auto_saved = any(q.get("auto") for q in ((row or {}).get("question_regions") or []))
+    if payload.get("auto_layout") != auto_saved:
+        return True
+    if not auto_saved and payload.get("regions_per_page") != expected_layout:
         return True
     if payload.get("preview_render_scale") != PREVIEW_RENDER_SCALE:
         return True

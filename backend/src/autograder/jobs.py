@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Optional
 
 from autograder.db import create_job, update_job
 from autograder.evaluation_service import run_evaluation
-from autograder.exam_layouts import parse_regions_per_page, resolve_regions_per_page
+from autograder.exam_layouts import parse_regions_per_page
 from autograder.schemas import EvaluateRequest
 
 logger = logging.getLogger(__name__)
@@ -61,11 +61,8 @@ def run_upload_bundle_job(
             skip_ingest=True,
         )
         ingest_keys_rag(exam_id, force=True)
-        layout = resolve_regions_per_page(
-            exam_id,
-            regions_per_page=parse_regions_per_page(regions_spec),
-            num_keys=len(key_resp.key_ids),
-        )
+        # Only the teacher's layout is echoed back; without one, evaluate detects answer positions (layout:auto).
+        layout = parse_regions_per_page(regions_spec)
         update_job(
             job_id,
             status="completed",
@@ -94,19 +91,13 @@ def run_upload_sheet_job(
     regions_spec: Optional[str],
 ) -> None:
     from autograder.api import _save_sheet_bytes
-    from autograder.db import list_answer_keys
 
     try:
         update_job(job_id, status="running", progress=30, stage="uploading")
         sheet_resp = _save_sheet_bytes(
             sheet_filename, sheet_bytes, exam_id, skip_ingest=True
         )
-        keys = list_answer_keys(exam_id)
-        layout = resolve_regions_per_page(
-            exam_id,
-            regions_per_page=parse_regions_per_page(regions_spec),
-            num_keys=len(keys),
-        )
+        layout = parse_regions_per_page(regions_spec)
         update_job(
             job_id,
             status="completed",
