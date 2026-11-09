@@ -107,11 +107,15 @@ def filter_hits_by_threshold(
     threshold: Optional[float] = None,
     min_keep: int = 1,
 ) -> List[Dict[str, Any]]:
-    """Keep hits at or above ``threshold``; retain at least ``min_keep`` best if all fail."""
+    """
+    Keep hits at or above ``threshold``, plus any hit that matched full-text search (``fts_match``); retain at least
+    ``min_keep`` best if all fail. Noisy handwriting OCR lowers cosine similarity (a correct chunk scored 0.32 vs the
+    0.35 default), so an exact keyword match is allowed to survive the cut-off.
+    """
     if not hits:
         return []
     thr = rag_similarity_threshold() if threshold is None else threshold
-    passed = [h for h in hits if float(h.get("similarity") or 0.0) >= thr]
+    passed = [h for h in hits if h.get("fts_match") or float(h.get("similarity") or 0.0) >= thr]
     if passed:
         return passed
     if min_keep <= 0:

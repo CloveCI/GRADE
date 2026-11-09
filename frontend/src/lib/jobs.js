@@ -5,6 +5,8 @@ export const JOB_STAGE_LABELS = {
   parsing_key: 'Reading marking scheme…',
   ingest_keys: 'Indexing model answers…',
   ingest_sheet: 'Scanning handwriting…',
+  ocr_read: 'Reading handwriting…',
+  index_sheet: 'Indexing the answer sheet…',
   ocr_evaluate: 'Grading questions…',
   done: 'Complete',
   error: 'Something went wrong',
