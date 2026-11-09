@@ -52,6 +52,9 @@ extraction-*.json
 # ── Private sample scans and keys (share deliberately, not by accident) ──────
 Key.pdf
 DocScanner*.pdf
+# Copies dropped at the repo root for testing; the sheet is already tracked as backend/cie/sheets/DISASTER MITIGATION.pdf
+/DISASTER MITIGATION.pdf
+/Disaster_Mitigation_Answer_Key_Reformatted.pdf
 
 # ── Local reference copies and legacy folders (not part of the app) ──────────
 /processing/
